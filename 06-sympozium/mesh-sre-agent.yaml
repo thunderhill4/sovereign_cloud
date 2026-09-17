@@ -1,0 +1,78 @@
+# mesh-sre-agent — Istio ambient mesh observability agent for cluster2.
+#
+# Answers "is the mesh healthy / what is degraded" from live cluster state:
+# istiod, ztunnel and istio-cni readiness, Gateway API `programmed` status,
+# waypoint enrollment, AuthorizationPolicy coverage, and east-west wiring.
+#
+# Skills:
+#   web-endpoint      — sidecar.requiresServer=true, so listing it here makes
+#                       serving declarative (AgentRun mode=server →
+#                       `mesh-sre-agent-web-endpoint-server` Deployment/Service).
+#   sre-observability — triage / PromQL / log-analysis playbooks.
+#   k8s-ops           — the kubectl+virtctl sidecar that task (chat) runs use.
+# Tool SkillPacks MUST be listed here as of 0.10.47: the apiserver copies the
+# Agent's spec.skills onto runs it creates, and a non-empty list containing only
+# a serving sidecar leaves chat runs with no tool sidecar at all. See the long
+# note in cluster2-agent.yaml for the full history.
+#
+# SCOPE — deliberately cluster2-only. Two hard limits found when designing this:
+#   1. cluster1's Prometheus is a ClusterIP Service (istio-system), so it is not
+#      reachable from a cluster2 pod. Kiali is a LoadBalancer (172.18.255.204)
+#      but reports cluster1's view of the mesh.
+#   2. Agent egress is denied by default — `sandbox-restricted`'s networkPolicy
+#      (denyAll + allowedEgress for Ollama and the K8s API only), reinforced by
+#      the `sympozium-allow-ollama` NetworkPolicy. Neither Kiali nor Prometheus
+#      is on that allowlist.
+# So the `prometheus-query` and `loki-and-logs` skills in the SkillPack have no
+# reachable backend here; the agent is briefed to say so rather than invent
+# metrics. Widen both the policy and the NetworkPolicy together if you want the
+# metrics path — RBAC alone will not open it.
+#
+# Istio CRD read access comes from agent-istio-rbac.yaml (the SkillPack's own
+# RBAC covers no Istio API groups).
+apiVersion: sympozium.ai/v1alpha1
+kind: Agent
+metadata:
+  name: mesh-sre-agent
+  namespace: sympozium-system
+  annotations:
+    sympozium.ai/description: "Istio ambient mesh observability agent (cluster2: istiod, ztunnel, waypoints, Gateway API)"
+spec:
+  agents:
+    default:
+      # qwen2.5:7b, matching cluster2-agent — llama3.2 confabulates plausible
+      # kubectl output when a tool call fails silently.
+      #
+      # Do not "upgrade" this to a bigger local model without testing the tool
+      # path. qwen3.5:9b was tried here and is WORSE: it emits the tool call as
+      # a ```yaml execute_command: ...``` block in the message text instead of
+      # invoking the sidecar, so no kubectl ever runs. qwen2.5:7b really calls
+      # the tool — it is just unreliable about it (see demo-mesh-sre.sh's retry).
+      model: qwen2.5:7b
+      baseURL: http://host-ollama.sympozium-system.svc.cluster.local:11434/v1
+      sandbox:
+        enabled: false
+  authRefs:
+    - provider: ollama
+      secret: llm-credentials
+  skills:
+    - skillPackRef: web-endpoint       # declarative serving (requiresServer=true)
+    - skillPackRef: sre-observability  # triage playbooks
+    - skillPackRef: k8s-ops            # kubectl sidecar for task (chat) runs
+  policyRef: sandbox-restricted
+  observability:
+    enabled: false
+  memory:
+    enabled: false
+    maxSizeKB: 256
+    # Environment briefing — keep SHORT (7B model). Edit here; re-apply with
+    # kubectl apply -k 06-sympozium/ to reproduce.
+    systemPrompt: |
+      RULE 1 — METRICS ARE UNAVAILABLE. Prometheus, Kiali, Grafana and Loki are NOT reachable from this agent (network egress is denied). If asked for latency, p50/p95, request rates, error rates, throughput or saturation, do NOT run a command and do NOT estimate: reply exactly "Metrics are not reachable from this agent — Prometheus and Kiali are outside its allowed egress. I can report mesh configuration and pod health instead." Never invent a number.
+      You are a service-mesh SRE for "cluster2", a Kind cluster running Istio 1.30 in AMBIENT mode. Your kubectl reaches THIS cluster only.
+      Ambient has NO sidecar proxies. The data plane is: ztunnel (DaemonSet, per-node L4 mTLS), istio-cni-node (DaemonSet, traffic redirection), istiod (control plane), istio-eastwest (cross-cluster gateway). All live in namespace istio-system.
+      Health checks, in order: kubectl get pods -n istio-system (istiod/ztunnel/istio-cni-node/istio-eastwest all Running and Ready); kubectl get gateways.gateway.networking.k8s.io -A (check the Programmed condition — this covers BOTH north-south gateways and waypoints); kubectl get authorizationpolicies,peerauthentications -A; kubectl get serviceentries,destinationrules -A (cross-cluster wiring); kubectl get events -n istio-system --field-selector type=Warning.
+      A namespace is in the mesh if it is labeled istio.io/dataplane-mode=ambient. A waypoint is a Gateway with gatewayClassName=istio-waypoint; without one a namespace gets L4 mTLS but no L7 policy.
+      Use full resource names (gateways.gateway.networking.k8s.io vs gateways.networking.istio.io are DIFFERENT resources).
+      You do NOT have kubectl to cluster1. Report only what a command actually returned.
+      Read-only. Propose changes for a human to apply; do not mutate mesh config.

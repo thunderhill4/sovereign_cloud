@@ -10,6 +10,7 @@ SYMPOZIUM_DEFAULT_AGENT="${SYMPOZIUM_DEFAULT_AGENT:-cluster2-agent}"
 # MetalLB LoadBalancer IPs for Sympozium serving-mode Services (see sympozium-lb-setup.sh)
 SYMPOZIUM_AGENT_URL="${SYMPOZIUM_AGENT_URL:-http://172.18.255.213:8080/}"
 SYMPOZIUM_AGENT_URL_TARGET_CLUSTER_AGENT="${SYMPOZIUM_AGENT_URL_TARGET_CLUSTER_AGENT:-http://172.18.255.214:8080/}"
+SYMPOZIUM_AGENT_URL_MESH_SRE_AGENT="${SYMPOZIUM_AGENT_URL_MESH_SRE_AGENT:-http://172.18.255.222:8080/}"
 # Upstream for the backend's de-branding console proxy (served on :8081,
 # embedded in the AI tab). Server-side only — needs to be reachable from the
 # backend process, not the browser.
@@ -78,6 +79,7 @@ SYMPOZIUM_NAMESPACE="$SYMPOZIUM_NAMESPACE" \
 SYMPOZIUM_DEFAULT_AGENT="$SYMPOZIUM_DEFAULT_AGENT" \
 SYMPOZIUM_AGENT_URL="$SYMPOZIUM_AGENT_URL" \
 SYMPOZIUM_AGENT_URL_TARGET_CLUSTER_AGENT="$SYMPOZIUM_AGENT_URL_TARGET_CLUSTER_AGENT" \
+SYMPOZIUM_AGENT_URL_MESH_SRE_AGENT="$SYMPOZIUM_AGENT_URL_MESH_SRE_AGENT" \
 SYMPOZIUM_API_TOKEN="$SYMPOZIUM_API_TOKEN" \
 SYMPOZIUM_DASHBOARD_URL="$SYMPOZIUM_DASHBOARD_URL" \
 SECURITY_AGENT_URL="$SECURITY_AGENT_URL" \
@@ -109,6 +111,7 @@ echo "  Backend:               http://localhost:8080"
 echo "  AI console proxy:      http://localhost:8081  (embedded in the AI tab)"
 echo "  Sympozium default:     ${SYMPOZIUM_AGENT_URL}  (${SYMPOZIUM_DEFAULT_AGENT})"
 echo "  Sympozium target:      ${SYMPOZIUM_AGENT_URL_TARGET_CLUSTER_AGENT}  (target-cluster-agent)"
+echo "  Sympozium mesh SRE:    ${SYMPOZIUM_AGENT_URL_MESH_SRE_AGENT}  (mesh-sre-agent)"
 echo "  Security agent:        ${SECURITY_AGENT_URL}"
 echo ""
 echo "Press Ctrl+C to stop."

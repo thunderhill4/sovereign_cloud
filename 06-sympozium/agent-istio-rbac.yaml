@@ -1,0 +1,89 @@
+# Read access to Istio + Gateway API resources for agent skill sidecars.
+#
+# The built-in `sre-observability` SkillPack's bundled clusterRBAC covers
+# core (nodes/pods/events/services/endpoints), apps, autoscaling, and
+# metrics.k8s.io — but NOT networking.istio.io, security.istio.io,
+# telemetry.istio.io, or gateway.networking.k8s.io. Without this grant an
+# observability agent can read pods but gets "permission issue" on
+# `kubectl get gateways` / `authorizationpolicies` / `serviceentries`, which
+# is exactly the mesh state it exists to report on.
+#
+# This is the same gap (and the same fix) as agent-kubevirt-rbac.yaml: one
+# additive ClusterRole fixes every equipped agent at once, without patching
+# the Helm-managed SkillPack (which the controller mutates and an upgrade
+# reverts).
+#
+# STALE ASSUMPTION FIXED 2026-09-16 (chart 0.10.57 -> 0.10.75): this used to
+# bind the single shared `sympozium-agent` ServiceAccount, because every
+# skill sidecar ran as it. As of this chart range, AgentRun task pods run as
+# a per-run ServiceAccount (`sympozium-run-<agentrun-name>`, controller-
+# created, one-shot, bound to a matching per-run Role/RoleBinding pair — not
+# a ClusterRole, so ClusterRole aggregation labels don't reach it either).
+# Binding one ServiceAccount name can no longer cover future runs, so this
+# binds the namespace's default service-account Group instead — every SA in
+# sympozium-system, present or future, inherits this read grant. Verified via
+# `kubectl get sa <per-run-name> -o yaml` (namespace sympozium-system, no
+# special group membership beyond the default) and a live
+# `--as=system:serviceaccount:sympozium-system:sympozium-run-<name>` check.
+#
+# Read-only by design. Mesh changes are made through the 07-istio-advanced/
+# manifests, not by an agent — see the Architecture Constraints in
+# Sovereign_Cloud_Agentic_Strategy.md before widening these verbs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sympozium-agent-istio-read
+rules:
+  # Ambient + classic mesh config: waypoints and east-west wiring surface as
+  # gateways/serviceentries; destinationrules carry failover and locality.
+  - apiGroups: ["networking.istio.io"]
+    resources:
+      - gateways
+      - virtualservices
+      - destinationrules
+      - serviceentries
+      - sidecars
+      - workloadentries
+      - workloadgroups
+      - envoyfilters
+      - proxyconfigs
+    verbs: ["get", "list", "watch"]
+  # L4/L7 policy enforced by ztunnel and waypoints.
+  - apiGroups: ["security.istio.io"]
+    resources:
+      - authorizationpolicies
+      - peerauthentications
+      - requestauthentications
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["telemetry.istio.io"]
+    resources:
+      - telemetries
+    verbs: ["get", "list", "watch"]
+  # Gateway API is how Istio 1.30 models north-south and waypoint gateways;
+  # `programmed` status here is the primary health signal for both.
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources:
+      - gatewayclasses
+      - gateways
+      - httproutes
+      - grpcroutes
+      - tcproutes
+      - tlsroutes
+      - referencegrants
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sympozium-agent-istio-read
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sympozium-agent-istio-read
+subjects:
+  # Covers every ServiceAccount in the namespace, including the per-run
+  # sympozium-run-<name> identities AgentRun task pods now use — see the
+  # note above. Kubernetes auto-membership, no per-run maintenance needed.
+  - kind: Group
+    name: system:serviceaccounts:sympozium-system
+    apiGroup: rbac.authorization.k8s.io

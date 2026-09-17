@@ -12,6 +12,7 @@
 #   172.18.255.217 - security-agent               (set in ui/k8s/security-agent.yaml)
 #   172.18.255.218 - cost-analyzer (serving)      (this script)
 #   172.18.255.219 - incident-responder (serving) (this script)
+#   172.18.255.222 - mesh-sre-agent (serving)     (this script)
 
 set -e
 
@@ -71,6 +72,7 @@ patch_svc "cluster2-agent"       "172.18.255.213" "8080"
 patch_svc "target-cluster-agent" "172.18.255.214" "8080"
 patch_svc "cost-analyzer"        "172.18.255.218" "8080"
 patch_svc "incident-responder"   "172.18.255.219" "8080"
+patch_svc "mesh-sre-agent"       "172.18.255.222" "8080"
 
 echo ""
 echo "Done. Verify with:"

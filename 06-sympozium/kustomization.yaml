@@ -19,5 +19,7 @@ resources:
   - host-ollama-service.yaml
   - agent-egress-ollama.yaml
   - agent-kubevirt-rbac.yaml
+  - agent-istio-rbac.yaml
   - node-probe-loopback-ds.yaml
   - cluster2-agent.yaml
+  - mesh-sre-agent.yaml
