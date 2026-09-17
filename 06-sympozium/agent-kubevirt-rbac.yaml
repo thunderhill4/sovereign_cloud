@@ -3,10 +3,16 @@
 # The built-in k8s-ops SkillPack's bundled RBAC covers core/apps/batch/etc.
 # but NOT kubevirt.io or cdi.kubevirt.io — so any k8s-ops-equipped agent can
 # read nodes/pods but gets "permission issue" on `kubectl get vm` (found by
-# labs 02/08, see 06-sympozium/labs/). All skill sidecars run as the
-# sympozium-agent ServiceAccount; this additive grant fixes them all at once
-# without patching the Helm-managed SkillPack (which the controller mutates
-# and an upgrade would revert).
+# labs 02/08, see 06-sympozium/labs/). This additive grant fixes them all at
+# once without patching the Helm-managed SkillPack (which the controller
+# mutates and an upgrade would revert).
+#
+# STALE ASSUMPTION FIXED 2026-09-16 (chart 0.10.57 -> 0.10.75): see the
+# matching note in agent-istio-rbac.yaml — skill sidecars no longer share the
+# `sympozium-agent` ServiceAccount; AgentRun task pods run as a controller-
+# created per-run SA instead. Binds the namespace's default service-account
+# Group so every current and future run inherits this without per-run
+# maintenance.
 #
 # Read-only by design: agents that must START/STOP VMs (incident-responder,
 # cost-analyzer) do so via the demo flow's own tooling; widen this
@@ -36,6 +42,9 @@ roleRef:
   kind: ClusterRole
   name: sympozium-agent-kubevirt-read
 subjects:
-  - kind: ServiceAccount
-    name: sympozium-agent
-    namespace: sympozium-system
+  # Covers every ServiceAccount in the namespace, including the per-run
+  # sympozium-run-<name> identities AgentRun task pods now use — see the
+  # note above. Kubernetes auto-membership, no per-run maintenance needed.
+  - kind: Group
+    name: system:serviceaccounts:sympozium-system
+    apiGroup: rbac.authorization.k8s.io

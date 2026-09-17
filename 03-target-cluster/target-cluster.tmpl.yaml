@@ -61,7 +61,7 @@ metadata:
   namespace: default
 spec:
   replicas: 1
-  version: v1.31.4+k3s1
+  version: v1.37.0+k3s1
   kthreesConfigSpec:
     agentConfig:
       airGapped: true
@@ -141,7 +141,7 @@ spec:
   template:
     spec:
       clusterName: {{CLUSTER_NAME}}
-      version: v1.31.4+k3s1
+      version: v1.37.0+k3s1
       bootstrap:
         configRef:
           apiVersion: bootstrap.cluster.x-k8s.io/v1beta2

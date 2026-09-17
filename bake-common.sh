@@ -18,7 +18,16 @@
 #     EXTRA_PACKAGES — space-separated apt packages to install via cloud-init
 #                      packages: section before bake.sh runs. Use for lean
 #                      base images (Ubuntu Minimal) that lack k3s deps.
-#     K3S_VERSION    — k3s version to bake (default: v1.31.4+k3s1)
+#     K3S_VERSION    — DOES NOT actually control the bake (found 2026-09-16,
+#                      upgrading v1.31.4+k3s1 -> v1.37.0+k3s1): the version
+#                      that reaches the VM is a SEPARATE hardcoded literal
+#                      inside the embedded /usr/local/bin/bake.sh cloud-init
+#                      content below (search this file for the second
+#                      K3S_VERSION= assignment) — that content block is
+#                      written to the VM verbatim, so this outer bash
+#                      variable never reaches it. Keep both literals in sync
+#                      by hand until someone wires the interpolation through.
+#                      (default here: v1.37.0+k3s1)
 #     TARGET_IMAGE   — final containerDisk image ref printed in the end banner
 #                      (default derived from DV_TARGET)
 #
@@ -28,7 +37,7 @@
 
 set -euo pipefail
 
-K3S_VERSION="${K3S_VERSION:-v1.31.4+k3s1}"
+K3S_VERSION="${K3S_VERSION:-v1.37.0+k3s1}"
 DV_SOURCE="${DV_SOURCE:?bake-common: DV_SOURCE must be set}"
 DV_TARGET="${DV_TARGET:?bake-common: DV_TARGET must be set}"
 VM_NAME="${VM_NAME:?bake-common: VM_NAME must be set}"
@@ -153,7 +162,7 @@ emit_cloudinit() {
     content: |
       #!/bin/bash
       set -e
-      K3S_VERSION="v1.31.4+k3s1"
+      K3S_VERSION="v1.37.0+k3s1"
       BAKE_MODE="$(cat /etc/bake-mode 2>/dev/null || echo preinit)"
       echo "[bake] mode: ${BAKE_MODE}"
 

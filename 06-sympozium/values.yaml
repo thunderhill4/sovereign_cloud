@@ -30,6 +30,19 @@ controller:
 
 nats:
   enabled: true
+  # 0.10.57 defaults nats.auth.enabled to true and wires NATS_USERNAME/PASSWORD
+  # into the controller and llmfit-daemonset -- but NOT into the built-in
+  # web-endpoint SkillPack's sidecar env (still just EVENT_BUS_URL, no creds).
+  # Every served agent's web-proxy sidecar then dials NATS unauthenticated and
+  # is rejected (`nats` pod logs: "authentication error"), crash-looping with
+  # exit 2 and zero log output -- same signature as the :latest-skew landmine,
+  # different cause. Disabled here to restore the known-working behavior this
+  # repo has always run on. NATS is ClusterIP-only, internal to sympozium-system,
+  # never exposed via MetalLB -- same demo-simplicity trade-off as the fixed CAs
+  # elsewhere in this repo. Re-evaluate on a future chart bump: if web-endpoint's
+  # sidecar env gets NATS credentials upstream, auth can go back on.
+  auth:
+    enabled: false
 # GPU/DRA subchart, new and enabled-by-default as of 0.10.47. Disabled here to
 # keep the 0.10.38 -> 0.10.47 upgrade's blast radius on the control plane only.
 # The Kind node passes /dev/nvidia* through but has no nvidia-smi / NVML (see

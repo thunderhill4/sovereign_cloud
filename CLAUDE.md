@@ -10,7 +10,7 @@ This repo provisions Kubernetes target clusters as KubeVirt VMs on a Kind-based 
 
 **Clusters:**
 - `cluster1` (Kind) — demo/mesh cluster. Bare by default; `07-istio-advanced/` installs
-  MetalLB + Istio 1.30 ambient + Gateway API on it. (It previously hosted an ad-hoc
+  MetalLB + Istio 1.31 ambient + Gateway API on it. (It previously hosted an ad-hoc
   ambient mesh with `httpbin`/`sleep`; that was lost in a rebuild and is not recreated
   by any script.)
 - `cluster2` (Kind) — Management cluster running CAPI, KubeVirt, CDI, MetalLB, Sympozium
@@ -73,6 +73,7 @@ no-op, so cluster1 would advertise cluster2's range on the shared L2 segment.
 | 172.18.255.219  | incident-responder (Sympozium) | `sympozium-lb-setup.sh`             |
 | 172.18.255.220  | host-ollama-lb (optional)      | `snippets/host-ollama/` (`WITH_LB=1`) |
 | 172.18.255.221  | Act 3 east-west gateway (cluster2) | `07-istio-advanced/act3-multicluster/02-...yaml` |
+| 172.18.255.222  | mesh-sre-agent (Sympozium)     | `sympozium-lb-setup.sh`             |
 
 **Note:** `.221` is outside the cluster2 pool as originally configured (`.211-.220`).
 `07-istio-advanced` widens that pool to `.211-.225` rather than reusing `.216`, which the
@@ -97,7 +98,7 @@ make ui                 # launch web UI dev servers
 ### Cluster Lifecycle
 
 ```bash
-make target-cluster            # DEFAULT — WARM fast-path (parallel boot, ~34.5s measured)
+make target-cluster            # DEFAULT — WARM fast-path (parallel boot, ~33.7s both nodes measured)
 make target-cluster-warm       # same warm fast-path, explicit
 make target-cluster-lite       # legacy lite, 2 CPU / 4Gi (sequential, :latest)
 make target-cluster-full       # legacy full, 4 CPU / 8Gi (sequential, :latest)
@@ -112,10 +113,10 @@ the image carries fixed CAs + token (`03-target-cluster/warm-ca/`) so `scripts/s
 can pre-seed matching CAPI secrets — KThrees adopts them, so first boot needs **no
 `--cluster-reset` and no cert purge**. **Measured time-to-ready: median 34.5s**
 (34.5 / 34.2 / 34.7, spread 0.5s) — the earlier "<40s target" in this file was an
-aspiration never met by the image work, and the warm image itself contributes **no**
-speedup over the plain parallel build (see `docs/sub-60s-cluster-strategy.md` §5-6;
-measured warm 48.5s vs parallel 46.6-50.0s). What actually moved the number was two
-one-line config fixes, neither of them an image change (50.0s -> 34.5s, -31%):
+aspiration never met by the image work, and the warm image itself contributes **no** speedup
+over the plain parallel build (see `docs/sub-60s-cluster-strategy.md` §5-6; measured
+warm 48.5s vs parallel 46.6-50.0s). What actually moved the number was
+two one-line config fixes, neither of them an image change (50.0s -> 34.5s, -31%):
 
 1. **`advertise-address` on the control plane** (50.0s -> 42.7s). A KubeVirt VM's pod IP
    is reachable from the node but **not from other pods**, so a worker whose agent is
@@ -127,6 +128,22 @@ one-line config fixes, neither of them an image change (50.0s -> 34.5s, -31%):
    qemu on every VM start. Raised to 1 core by `scripts/configure-kubevirt-perf.sh`
    (`make kubevirt-perf`, auto-run from `02-capi-init/init-management-cluster.sh`).
    **This is cluster state, not manifest state — re-run it after any cluster2 rebuild.**
+
+**Re-measured 2026-09-17 after the Kubernetes/Istio/k3s upgrade** (Kind node image
+1.35.0 -> 1.37.0, k3s v1.31.4+k3s1 -> v1.37.0+k3s1, cluster2 fully rebuilt): both nodes
+Ready at median **33.7s** (30.4 / 35.1 / 33.7; control plane alone 24.7s) — no measurable
+change from the pre-upgrade 34.5s. **An earlier 23.9s figure recorded here was wrong: it
+was the control plane only.** Both `scripts/phase-timings.sh` and `scripts/time-to-ready.sh`
+wait for "2 nodes Ready" *by count*, and the `:warm` image carries a ghost Node object
+(`ubuntu-bake-vm-warm`, from the bake VM, still marked Ready) that the control plane's
+async `warm-ghost-node-cleanup` step deletes only after startup. So the count reaches 2
+(control plane + ghost) before the worker joins — observed in every run on 2026-09-17.
+`phase-timings.sh` then also finds no worker Ready timestamp and treats it as zero, so its
+"TOTAL (both nodes)" silently equals the control-plane time. Until the scripts wait for
+nodes **by name**, measure by polling `-cp-` and `-workers-` Ready separately. The
+worker's `[airgap-install]` output also never prints the "k3s started" line the
+instrument looks for, so that worker row is always empty. Both Chapter 8 fixes above
+still hold (re-applied fresh on the rebuilt cluster2).
 
 Use `./scripts/phase-timings.sh` (`make phase-timings`; per-phase breakdown, read-only,
 no SSH needed) rather than a single aggregate number when judging any change here — the
@@ -263,10 +280,69 @@ SYMPOZIUM_NAMESPACE=sympozium-system
 SYMPOZIUM_DEFAULT_AGENT=cluster2-agent
 SYMPOZIUM_AGENT_URL=http://172.18.255.213:8080/
 SYMPOZIUM_AGENT_URL_TARGET_CLUSTER_AGENT=http://172.18.255.214:8080/
+SYMPOZIUM_AGENT_URL_MESH_SRE_AGENT=http://172.18.255.222:8080/
 SYMPOZIUM_API_TOKEN=<token from sympozium-ui-token Secret>
 SYMPOZIUM_DASHBOARD_URL=http://172.18.255.212:8080   # console-proxy upstream (server-side; in prod the in-cluster svc DNS)
 CLAUDE_DIR=<repo root>
 ```
+
+### `mesh-sre-agent` — Istio ambient mesh observability
+
+Third serving agent (`06-sympozium/mesh-sre-agent.yaml`, in the `kubectl apply -k
+06-sympozium/` bundle), serving on `172.18.255.222`. Answers "is the mesh healthy /
+what is degraded" for **cluster2's** Istio 1.31 ambient mesh: istiod / ztunnel /
+istio-cni readiness, Gateway API `Programmed` status, waypoint enrollment,
+AuthorizationPolicy coverage, east-west wiring. Model `qwen2.5:7b` (not llama3.2 —
+it confabulates kubectl output when a tool call fails silently).
+
+Skills: `web-endpoint` (declarative serving) + `sre-observability` (triage playbooks)
++ `k8s-ops` (the kubectl sidecar task/chat runs actually use). All three must be
+listed on the Agent CR — see the 0.10.47 propagation note in `cluster2-agent.yaml`.
+
+**`sre-observability`'s bundled clusterRBAC covers no Istio API groups** (core, apps,
+autoscaling, metrics only), so every mesh query dead-ends on "permission issue" until
+`06-sympozium/agent-istio-rbac.yaml` grants read on `networking.istio.io`,
+`security.istio.io`, `telemetry.istio.io`, and `gateway.networking.k8s.io` to the
+`sympozium-agent` SA. Same gap and same additive-ClusterRole fix as
+`agent-kubevirt-rbac.yaml` for `kubevirt.io`.
+
+**Scope is deliberately cluster2-only, and two things enforce that** — do not assume
+the SkillPack's `prometheus-query` / `loki-and-logs` skills work here:
+1. cluster1's Prometheus is a **ClusterIP** Service, unreachable from a cluster2 pod.
+   Kiali is a LoadBalancer (`.204`) but shows cluster1's view.
+2. Agent egress is denied by default — `sandbox-restricted`'s `networkPolicy`
+   (`denyAll` + `allowedEgress` for Ollama and the K8s API), reinforced by the
+   `sympozium-allow-ollama` NetworkPolicy. Neither Kiali nor Prometheus is allowlisted.
+
+Opening the metrics path needs **both** the policy and the NetworkPolicy widened —
+RBAC alone will not do it.
+
+**Do not rely on the `systemPrompt` to enforce that.** The briefing opens with a
+RULE 1 telling the agent to refuse metrics questions verbatim and never estimate.
+Measured on qwen2.5:7b across repeated attempts, it does **not** reliably comply: it
+ignores "do not run a command", and in one run answered "we can make an educated
+guess based on the availability of related metrics". It never actually emitted a
+fabricated number in testing — but the guard is a nudge, not a control. Moving the
+rule to the top of the prompt did not fix it. If refusal must be guaranteed, enforce
+it below the model (policy `toolGating`, or egress that fails closed and is surfaced
+as an error), not in the prompt. Same class of limitation as the 7B tool-calling
+ceiling already noted for llama3.2.
+
+Verify reach deterministically, never by trusting the model:
+`kubectl get gateways.gateway.networking.k8s.io -A --as=system:serviceaccount:sympozium-system:sympozium-agent`
+
+**Demo:** `06-sympozium/demo-mesh-sre.sh` drives the real agent through 7 scenes and
+(with `SCENE_DIR=<dir>`) writes a transcript; `scripts/render-demo-video.sh <dir>
+<out.mp4>` renders it to `docs/demo/mesh-sre-agent-demo.mp4`. Frames are HTML rendered
+by headless Chrome and stitched with ffmpeg — there is no asciinema/vhs/agg on this
+host. The demo re-asks a question only when the reply is *structurally* broken (empty,
+or a raw tool call leaked as text); a well-formed but unhelpful answer is kept, so the
+video shows the agent's real hit rate rather than a curated one.
+
+**Not in kubeui's agent dropdown.** `HandleListAgents` still queries the removed
+`SympoziumInstance` CRD and falls back to listing only `SYMPOZIUM_DEFAULT_AGENT`, so
+new `Agent` CRs never appear there. Reachable directly on `.222` or via
+`SYMPOZIUM_AGENT_URL_MESH_SRE_AGENT`.
 
 ### Warm Pool (pre-deployed standby)
 
@@ -321,6 +397,61 @@ The UI is deployed to the `kubeui` namespace on cluster2 (`ui/k8s/kubeui.yaml`):
 
 ## Common Pitfalls
 
+- **Kubernetes/Istio/k3s upgraded 2026-09-16**: cluster1 + cluster2 Kind node image
+  1.35.0 -> **1.37.0** (`kind` CLI also bumped 0.31.0 -> 0.33.0 to get that image as
+  its default), Istio 1.30.3 -> **1.31.0**, target-cluster k3s v1.31.4+k3s1 ->
+  **v1.37.0+k3s1**, `ui/backend`'s `client-go`/`k8s.io/api`/`apimachinery` 0.36.2 ->
+  **0.37.0**. Both Kind clusters were fully deleted and recreated (no in-place Kind
+  upgrade path exists) — everything downstream was rebuilt from scratch: KubeVirt
+  v1.9.0 + CDI v1.66.0 (**these, plus the `ubuntu-noble-dv` base-image DataVolume and
+  the `cluster1`/`cluster2` Kind clusters themselves, are NOT created by any script in
+  this repo** — they're manual prerequisites per the README, easy to forget when
+  reproducing this), MetalLB, CAPI/CAPK/cluster-api-k3s providers, the `:warm` golden
+  image, target-cluster, all of `07-istio-advanced` (prereqs through act5), and
+  Sympozium 0.10.75. Full re-verification: `make istio-adv-verify` 22/22,
+  `make verify` clean, live chat completions through all three Sympozium agents.
+  **No Istio release supports Kubernetes 1.37 yet** (checked 1.31.0's own announcement
+  — tested range is still 1.32-1.36) so this combination is running deliberately
+  unsupported; it happened to pass every check here, but re-verify before trusting
+  that a future patch bump keeps it that way. Findings from the rebuild:
+  1. **`bake-common.sh`'s documented `K3S_VERSION` override never controlled the
+     bake.** The version that actually reaches the VM is a second, independent
+     hardcoded literal inside the embedded `/usr/local/bin/bake.sh` cloud-init
+     content (that block is written to the VM verbatim; the outer bash variable
+     never reaches it). Both literals are now `v1.37.0+k3s1` and commented to stay
+     in sync by hand.
+  2. **The registry survives cluster deletion** (it's a separate container, not
+     inside either Kind cluster) but that means its `ubuntu-noble-k3s:latest`/
+     `:warm`/`:preinit` tags keep whatever was baked into them — after this bump
+     they still had the **old k3s v1.31.4 binary** until explicitly rebaked.
+     `ensure-warm-image`/`pre-pull-*` only check tag *presence*, not version, so
+     they would have silently reused the stale image. Rebaked `:warm` for the
+     default path; **`:latest`/`:preinit` (the `target-cluster-lite/full/parallel`
+     legacy paths) were NOT rebaked** and still carry the old k3s binary — rebake
+     with `make bake-image build-containerdisk-preinit pre-pull-preinit` (and the
+     plain non-preinit equivalent for `:latest`) before using those paths.
+  3. **The k3s bootstrap/control-plane CAPI providers (still v0.3.0, unchanged)
+     ship a dead `kube-rbac-proxy` image** (`gcr.io/kubebuilder/kube-rbac-proxy:v0.16.0`,
+     `ImagePullBackOff: not found`). Both provider Deployments sit at 1/2 ready
+     forever, `02-capi-init/init-management-cluster.sh`'s own readiness waits
+     silently time out into their `|| true` fallback (so `make capi-init` reports
+     success anyway), and the first `target-cluster` deploy fails opaquely on
+     `failed calling webhook ...kthreescontrolplane: connection refused` (the
+     mutating webhook that image would have served never started). Fixed by
+     patching both Deployments' `kube-rbac-proxy` container to
+     `quay.io/brancz/kube-rbac-proxy:v0.16.0` (confirmed pullable, and what the
+     equivalent Deployments ran successfully before this rebuild) — now done
+     automatically by `init-management-cluster.sh` right after `clusterctl init`.
+  4. **`scripts/configure-kubevirt-perf.sh`'s auto-run from `init-management-cluster.sh`
+     can silently no-op** (`|| true` swallows the failure) if it races KubeVirt's own
+     operator still initializing. Verify `supportContainerResources` actually landed
+     (`kubectl get kubevirt kubevirt -n kubevirt -o jsonpath='{.spec.configuration.supportContainerResources}'`)
+     after any fresh `make capi-init`; re-run `make kubevirt-perf` by hand if empty.
+  5. Fresh `AgentRun`s created concurrently by `fix-web-proxy-image.sh` can race
+     into a terminal `Failed` phase (`"server Deployment not found"`) — same
+     "controller does not retry a terminal Failed run" gap noted elsewhere in this
+     file. `kubectl delete agentrun <name>-web-endpoint` and let the controller
+     regenerate it.
 - The backend uses `go run .` in development — no pre-compilation needed
 - The `CLAUDE_DIR` env var is passed to the backend so it can find repo scripts (e.g., for `kubectl apply`)
 - `target-cluster-kubeconfig` is a plain file in the repo root — used by `make istio` and verification scripts
@@ -385,5 +516,97 @@ The UI is deployed to the `kubeui` namespace on cluster2 (`ui/k8s/kubeui.yaml`):
   `POST /api/v1/runs` chat run returned the real node name `cluster2-control-plane`.
   Original 0.10.38 description follows.
 - **Chat/dashboard AgentRuns get no skill sidecar, so tool calls silently go nowhere** ("It seems there might be an issue with the skill sidecar..." is the model giving up, not a real sidecar crash). Root cause: `POST /api/v1/runs` (what the dashboard chat and kubeui's `/api/ai/chat` proxy both create runs through) never sets `spec.skills` — nothing in 0.10.38 propagates an agent's tools into runs spawned on its behalf. A run without `spec.skills` gets only the `agent` + `ipc-bridge` containers, no `k8s-ops` sidecar to execute `kubectl`/`virtctl`. Fixed by `06-sympozium/skills-webhook/`: a mutating admission webhook (`MutatingWebhookConfiguration agentrun-skills-injector`, `failurePolicy: Ignore`) that patches `spec.skills` onto CREATEd AgentRuns when `spec.mode == "task"` and `spec.skills` is empty, choosing the SkillPack **per agent** via `INJECT_SKILL_MAP` (default `cluster2-agent=k8s-ops,target-cluster-agent=target-k8s-ops`). `cluster2-agent` gets `k8s-ops` (in-cluster SA → cluster2 API); `target-cluster-agent` gets `target-k8s-ops` (mounts the `target-cluster-kubeconfig` Secret → reaches *inside* the target k3s cluster at `172.18.255.215:6443`). Deploy: `06-sympozium/skills-webhook/build-and-deploy.sh` (builds the Go binary + image, `kind load docker-image` into cluster2, applies `deploy.yaml`; TLS via a self-signed cert-manager `Issuer`+`Certificate`, CA auto-injected via `cert-manager.io/inject-ca-from`). Verified: a `curl POST /api/v1/runs` with no `skills` field came back with real `kubectl get nodes` output instead of the sidecar-error text. Separately, weaker local models (llama3.2) can still emit a malformed tool call as raw text even with the sidecar present — that's the existing 7B tool-calling limitation, not this bug.
-- **STALE as of a from-scratch rebuild against the currently-published chart**: `sympoziuminstances.sympozium.ai` is no longer shipped as a CRD at all (verified absent on chart versions 0.10.38 through 0.10.47 pulled fresh from `https://deploy.sympozium.ai/charts`) — applying one now fails admission outright (`no matches for kind "SympoziumInstance"`). The `SympoziumInstance` documents in `cluster2-agent.yaml`/`target-cluster-agent.yaml` referenced above have been removed; only the `Agent` CRs remain. kubeui's agent dropdown (`ui/backend/handlers/ai.go` `HandleListAgents`) still queries the (now-nonexistent) CRD, gets an error, and falls back to listing just `SYMPOZIUM_DEFAULT_AGENT` — functional but no longer auto-discovers other agents. `install-sympozium.sh` pins `--version 0.10.38` (`SYMPOZIUM_CHART_VERSION`) since that's the version everything else in this doc was verified against; going to `latest` is otherwise fine (KubeVirt/CDI/CAPI were all bumped to current-latest in the same rebuild with no issues) but chart upgrades should be re-verified against this file before trusting it blind.
+- **STALE as of a from-scratch rebuild against the currently-published chart**: `sympoziuminstances.sympozium.ai` is no longer shipped as a CRD at all (verified absent on chart versions 0.10.38 through 0.10.47 pulled fresh from `https://deploy.sympozium.ai/charts`) — applying one now fails admission outright (`no matches for kind "SympoziumInstance"`). The `SympoziumInstance` documents in `cluster2-agent.yaml`/`target-cluster-agent.yaml` referenced above have been removed; only the `Agent` CRs remain. kubeui's agent dropdown (`ui/backend/handlers/ai.go` `HandleListAgents`) still queries the (now-nonexistent) CRD, gets an error, and falls back to listing just `SYMPOZIUM_DEFAULT_AGENT` — functional but no longer auto-discovers other agents. `install-sympozium.sh` pinned `--version 0.10.38` at the time; that pin has since moved to 0.10.47 and then 0.10.57 (see the dated entry below) as each was verified against this file. Chart upgrades should be re-verified against this file before trusting it blind — do not assume `latest` is safe just because a past jump was.
+- **Upgraded 0.10.47 -> 0.10.57 (2026-09-09, latest published at the time).** CRDs and
+  `Agent`/`AgentRun.spec.skills`/`policyRef` schemas are unchanged (purely additive:
+  `agentruntimes`, `agentrunturns`, `cellntools(submissions)`, `harnesssessions`,
+  `workspacesessions` CRDs; `celln` stays `enabled: false` by default). Three things broke
+  on the way, all now handled by `install-sympozium.sh`'s comment block and
+  `06-sympozium/values.yaml`:
+  1. A NEW chart-templated `sympozium-agent` ServiceAccount collided with the one the
+     controller had already created out-of-band (no Helm ownership annotations) — `helm
+     upgrade` refused to adopt it until labeled/annotated by hand. Confirmed harmless to
+     adopt in place (no deletion, no UID change, no interruption to the 3 pods actively
+     using it) and confirmed **all subjects across the chart's RoleBindings, and this
+     repo's own additive `agent-kubevirt-rbac.yaml`/`agent-istio-rbac.yaml`, still target
+     the literal name `sympozium-agent`** — the rbac.yaml comment about per-run
+     `sympozium-run-*` accounts describes a template/annotation-copy pattern (for external
+     cloud workload identity federation) that is not wired into normal AgentRun pod
+     creation; verified via the actual `spec.serviceAccountName` on live pods before and
+     after, and via the deterministic Istio/KubeVirt RBAC checks below.
+     **SUPERSEDED by the 0.10.75 entry below: this stopped being true somewhere in
+     0.10.58-0.10.75. Don't trust "all skill sidecars run as `sympozium-agent`" without
+     re-checking `spec.serviceAccountName` on a live run pod.**
+  2. `helm upgrade --wait` polls every `MCPServer`'s custom status, including `postgres`
+     (an intentionally `Suspended`, never-configured example) — `--wait` times out on it
+     regardless of chart version. Not a regression; drop `--wait` and verify manually.
+  3. **0.10.57 defaults `nats.auth.enabled: true`** and wires `NATS_USERNAME`/`PASSWORD`
+     into the controller and llmfit-daemonset — but the built-in `web-endpoint` SkillPack's
+     sidecar env (`EVENT_BUS_URL` only) was never updated to match. Every served agent's
+     web-proxy dialed NATS unauthenticated, was rejected (`nats` pod log: `authentication
+     error`), and crash-looped with **exit 2, zero log output** — the same failure
+     signature as the `:latest` tag-skew landmine and the old `readOnlyRootFilesystem` bug,
+     a third distinct root cause behind the identical symptom. Fixed by setting
+     `nats.auth.enabled: false` in `06-sympozium/values.yaml` (NATS is ClusterIP-only,
+     never exposed via MetalLB — same demo-simplicity trade-off as the fixed CAs
+     elsewhere). Re-evaluate if a future chart version wires the SkillPack correctly.
+  As a byproduct, this also silently fixed `target-cluster-agent`'s **separate,
+  unrelated, 11-day-old** crash loop (created 2026-08-29 under 0.10.47, before
+  `nats.auth` existed at all — so a different cause, most likely the same
+  `readOnlyRootFilesystem` class of bug already fixed upstream for the other two agents
+  but never picked up because that pod was never recreated) — `fix-web-proxy-image.sh`'s
+  mandatory post-upgrade re-pin regenerates all three serving AgentRuns, which recreated
+  it too. Verified end-to-end: real `POST /v1/chat/completions` -> real model response
+  through `cluster2-agent`, plus `kubectl get gateways.gateway.networking.k8s.io -A
+  --as=system:serviceaccount:sympozium-system:sympozium-agent` and the KubeVirt
+  equivalent both still resolve.
+
+- **Upgraded 0.10.57 -> 0.10.75 (2026-09-16, latest published at the time).** `Agent`/
+  `AgentRun.spec.skills`/`policyRef` schemas unchanged again. CRD/RBAC diff is purely
+  additive (`cellnexecutionpolicies`, `cellnruntimeprofiles`, `clustercellntools`,
+  `modelconnections` CRDs for the new Celln-fleet + model-gateway features, both
+  `enabled: false` by default and untouched by `06-sympozium/values.yaml`) plus a real
+  upstream bug fix (generated NATS `control-password`/`bridge-password` could start with
+  a digit, which `nats.conf` parses as a number/duration and refuses — passwords are now
+  letter-led). `helm upgrade --server-side=true --force-conflicts` (no `--wait`, per the
+  0.10.57 entry above) went through clean with **zero SA-adoption conflict** — that part
+  of the 0.10.57 upgrade doesn't recur once the SA carries Helm's ownership annotations.
+  One real breaking change, found only by testing (not visible in the template/CRD diff —
+  it's a controller runtime behavior change): **AgentRun task pods now run as a per-run
+  ServiceAccount** (`sympozium-run-<agentrun-name>`, controller-created, owned by the
+  `AgentRun`, deleted with it) **bound to a matching per-run `Role`+`RoleBinding` pair**
+  (`sympozium-skill-<skillpack>-<agentrun-name>`, namespaced `Role` — not a `ClusterRole`,
+  so aggregation-by-label isn't an option) — not the shared `sympozium-agent` SA every
+  skill sidecar used to run as. Confirmed via `kubectl get sa
+  sympozium-run-<real-run-name> -n sympozium-system -o yaml` (fresh SA,
+  `ownerReferences` -> the `AgentRun`) and cross-checked against every `RoleBinding` in
+  the namespace: runs created before this upgrade still show `sympozium-agent` as the
+  subject, every run created after show `sympozium-run-<name>`. This silently broke
+  `agent-istio-rbac.yaml` and `agent-kubevirt-rbac.yaml` (both bound only the literal
+  `sympozium-agent` subject): `mesh-sre-agent`'s live tool calls degraded to `qwen2.5:7b`
+  confabulating a "permission issue" writeup, while the old verification command —
+  `kubectl get gateways.gateway.networking.k8s.io -A
+  --as=system:serviceaccount:sympozium-system:sympozium-agent` — kept reporting success,
+  because it was checking an identity the running pods no longer used. Caught only by
+  driving a real `/v1/chat/completions` call end-to-end and getting a wrong answer, per
+  the "verify deterministically, never trust the model" rule in the `mesh-sre-agent`
+  section above — the deterministic-looking check was itself checking the wrong subject.
+  Fixed by rebinding both `ClusterRoleBinding`s to the `system:serviceaccounts:
+  sympozium-system` Group instead of the one SA name, so every current and future
+  per-run SA inherits the grant with no per-run maintenance. Verified with
+  `--as=system:serviceaccount:sympozium-system:sympozium-run-<real-run-name>` (the actual
+  identity a live pod carries — get this from a live pod's `spec.serviceAccountName`, not
+  assumed) and a live `mesh-sre-agent` chat completion whose reported gateway
+  (`istio-eastwest`, `172.18.255.221`, `Programmed: True`) matched real cluster state.
+  Also cleared two pre-existing, upgrade-unrelated `CrashLoopBackOff`s on
+  `mesh-sre-agent-web-endpoint-server` and `target-cluster-agent-web-endpoint-server`
+  (600+ restarts each, exit 2, zero log output — present before this upgrade started, same
+  symptom class as the `:latest` tag-skew and `nats.auth` landmines but not diagnosed
+  further since the mandatory post-upgrade `fix-web-proxy-image.sh` re-pin regenerates the
+  serving `AgentRun`s regardless, same as it did for the 0.10.47 -> 0.10.57 jump).
+  **Re-run the per-run-SA check after any future chart bump** — this identity model is new
+  enough in this chart's history that it could change shape again, and the failure mode
+  (a stale `--as=sympozium-agent` check reporting healthy while real traffic breaks) won't
+  announce itself.
+
 - **`helm install sympozium` silently drops some of the chart's built-in `SkillPack` resources** (kind: SkillPack, labeled `sympozium.ai/builtin: "true"` — observed: `web-endpoint`, `k8s-ops`, `code-review`, `incident-response`, `llmfit`, `memory`, `sre-observability`, `subagents`) even on a clean install with `--wait` reporting success and `helm get manifest` showing them as part of the release. Other kinds in the same chart (`SympoziumPolicy`, etc.) were not observed to be affected. Symptom: an `Agent` with `skills: [{skillPackRef: web-endpoint}]` gets an `AgentRun` stuck `Failed` with `"no sidecar with requiresServer=true found"` — no `<name>-web-endpoint-server` Deployment ever appears, so `sympozium-lb-setup.sh` has nothing to expose and the AI tab has no serving endpoint to call. Fixed by `06-sympozium/fix-missing-builtin-skillpacks.sh` (auto-run by `install-sympozium.sh` as step `2a/5`): diffs `helm get manifest`'s builtin-labeled SkillPacks against what's actually in-cluster and re-applies whatever is missing; idempotent. After it runs, delete any AgentRuns stuck `Failed` from before the SkillPack existed (`kubectl delete agentrun <name>-web-endpoint -n sympozium-system`) so the controller recreates them — it does not retry a terminal `Failed` run on its own.

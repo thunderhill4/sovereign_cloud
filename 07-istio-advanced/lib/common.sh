@@ -6,7 +6,7 @@
 #   source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 
 # ── Versions (single source of truth) ────────────────────────
-ISTIO_VERSION="${ISTIO_VERSION:-1.30.3}"
+ISTIO_VERSION="${ISTIO_VERSION:-1.31.0}"
 GATEWAY_API_VERSION="${GATEWAY_API_VERSION:-v1.5.1}"
 CERT_MANAGER_VERSION="${CERT_MANAGER_VERSION:-v1.16.2}"
 METALLB_VERSION="${METALLB_VERSION:-v0.14.9}"
