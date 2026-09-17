@@ -713,8 +713,15 @@ func HandleTargetClusterStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// API server + Istio reachability
+	// API server + Istio reachability.
+	// Deploy writes the kubeconfig to both /tmp and the repo root; /tmp does not
+	// survive a host reboot, so fall back to the repo-local copy — otherwise a
+	// perfectly healthy cluster reports "API server unreachable". Deletion removes
+	// both, so the local copy only exists while a cluster does.
 	kubeconfigPath := "/tmp/" + targetClusterName + "-kubeconfig"
+	if _, err := os.Stat(kubeconfigPath); err != nil {
+		kubeconfigPath = filepath.Join(claudeDir(), targetClusterName+"-kubeconfig")
+	}
 	if _, err := os.Stat(kubeconfigPath); err == nil {
 		status.APIReady = shellCheck(fmt.Sprintf(
 			"kubectl --kubeconfig=%s get nodes --request-timeout=3s 2>/dev/null", kubeconfigPath))
