@@ -348,14 +348,23 @@ new `Agent` CRs never appear there. Reachable directly on `.222` or via
 
 The backend keeps one `target-cluster` pre-built and labeled `pool.local/state=WARM`
 (reconcile goroutine in `ui/backend/handlers/pool.go`). Deploy **claims** a warm standby
-(relabel `CLAIMED`, synthetic SSE) in seconds instead of building (~50s). Delete tears
-down and the controller rebuilds a standby in the background. Invariant: at most one
-`target-cluster` at a time. Endpoint: `GET /api/v1/cluster/pool-status`
-→ `{state: none|building|warm|claimed, clusterReady, lastError}`. **Opt-in**:
-`run-ui.sh` defaults `POOL_ENABLED=false`; export `POOL_ENABLED=true` before
-running it to have the backend auto-build/rebuild a standby in the background.
-Standby builds via `target-cluster-parallel.yaml` (`:latest`);
-the on-demand fallback uses the warm image. Demo-only (fixed CA/token, single cluster).
+(relabel `CLAIMED`, refresh kubeconfig, streamed SSE) in well under a second instead of
+building (~34s). Delete tears down and the controller rebuilds a standby in the
+background. Invariant: at most one `target-cluster` at a time. Endpoint:
+`GET /api/v1/cluster/pool-status` → `{state: none|building|warm|claimed, clusterReady,
+lastError}`. **Opt-in**: `run-ui.sh` defaults `POOL_ENABLED=false`; export
+`POOL_ENABLED=true` before running it to have the backend auto-build/rebuild a standby
+in the background. **Fixed 2026-09-18**: `POOL_STANDBY_MANIFEST` default switched from
+`target-cluster-parallel.yaml` (`:latest`, which after the September upgrade still
+carried the pre-upgrade k3s v1.31.4 binary) to `target-cluster-warm.yaml`, matching the
+on-demand deploy path's default image; `buildStandby` now seeds the warm CA/token
+secrets first, same order as the deploy path. `targetNodesReady` (used by both the pool
+and the on-demand deploy path) now counts nodes by name rather than by raw count, so the
+`:warm` image's ghost bake-VM node can't falsely satisfy "2 nodes Ready" — same bug as
+the phase-timings.sh/time-to-ready.sh ghost-node finding above, confirmed live in this
+code path too. Re-measured claim time, 3 runs: 1.059s / 0.467s / 0.465s — median
+**467ms** (a June figure of 194ms had gone unverified; see
+`book/chapters/09-warmth-is-mandatory.md`). Demo-only (fixed CA/token, single cluster).
 
 ## Infrastructure Conventions
 

@@ -61,8 +61,11 @@ export REGISTRY_URL REGISTRY_ALIAS
 # backend auto-build/rebuild a standby cluster in the background.
 # Standby sizing is controlled by POOL_STANDBY_MANIFEST (point it at a
 # lite/parallel variant for smaller standbys) — there is no separate profile knob.
+# Default switched 2026-09-18 from target-cluster-parallel.yaml (:latest image,
+# still carrying the pre-upgrade k3s v1.31.4 binary per CLAUDE.md) to the warm
+# manifest, which matches the on-demand deploy path's default image.
 export POOL_ENABLED="${POOL_ENABLED:-false}"
-export POOL_STANDBY_MANIFEST="${POOL_STANDBY_MANIFEST:-03-target-cluster/target-cluster-parallel.yaml}"
+export POOL_STANDBY_MANIFEST="${POOL_STANDBY_MANIFEST:-03-target-cluster/target-cluster-warm.yaml}"
 export POOL_POLL_SECONDS="${POOL_POLL_SECONDS:-5}"
 
 cleanup() {

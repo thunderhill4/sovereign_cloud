@@ -167,16 +167,34 @@ func observeCluster(ctx context.Context) (exists bool, state string, ready bool)
 
 // targetNodesReady reports whether >= expected nodes are Ready on the target
 // cluster (via its kubeconfig at /tmp/<name>-kubeconfig).
+//
+// Counts by NAME, not by raw count: the :warm golden image carries a ghost
+// Node object (named after the bake VM, e.g. "ubuntu-bake-vm-warm") left over
+// from baking, still marked Ready until an async cleanup step removes it. A
+// bare count of Ready nodes can hit `expected` from control-plane + ghost
+// before the real worker ever joins — the same bug Chapter 7 of the book
+// found in phase-timings.sh/time-to-ready.sh. Only nodes named
+// "<cluster>-cp-*" or "<cluster>-workers-*" count.
 func targetNodesReady(expected int) bool {
 	kubeconfig := "/tmp/" + targetClusterName + "-kubeconfig"
 	if _, err := os.Stat(kubeconfig); err != nil {
 		return false
 	}
 	out := kubectlGet("--kubeconfig="+kubeconfig, "get", "nodes",
-		"-o", "jsonpath={range .items[*]}{.status.conditions[?(@.type==\"Ready\")].status}{\"\\n\"}{end}")
+		"-o", "jsonpath={range .items[*]}{.metadata.name}={.status.conditions[?(@.type==\"Ready\")].status}{\"\\n\"}{end}")
+	cpPrefix := targetClusterName + "-cp-"
+	workerPrefix := targetClusterName + "-workers-"
 	ready := 0
 	for _, line := range strings.Split(out, "\n") {
-		if strings.TrimSpace(line) == "True" {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		name, status, found := strings.Cut(line, "=")
+		if !found || status != "True" {
+			continue
+		}
+		if strings.HasPrefix(name, cpPrefix) || strings.HasPrefix(name, workerPrefix) {
 			ready++
 		}
 	}
@@ -314,9 +332,21 @@ func buildStandby(claimAfter bool, predelete bool) {
 
 	manifest := os.Getenv("POOL_STANDBY_MANIFEST")
 	if manifest == "" {
-		manifest = "03-target-cluster/target-cluster-parallel.yaml"
+		manifest = "03-target-cluster/target-cluster-warm.yaml"
 	}
 	manifestPath := filepath.Join(claudeDir(), manifest)
+	// Warm manifest needs the fixed CA/token secrets seeded first so KThrees
+	// adopts the material already baked into the :warm image (no CA conflict,
+	// no --cluster-reset) — same order as the on-demand deploy path.
+	if strings.Contains(manifest, "target-cluster-warm") {
+		deploy.addLog("info", "Warm standby — seeding fixed CA + token secrets so KThrees adopts the baked material...")
+		if err := runShell("bash " + filepath.Join(claudeDir(), "scripts/seed-cluster-secrets.sh")); err != nil {
+			pool.setBuildState("none", "failed to seed warm-path secrets: "+err.Error())
+			claimPending.Store(false)
+			deploy.finish("failed")
+			return
+		}
+	}
 	if err := runShell("kubectl apply -f " + manifestPath); err != nil {
 		pool.setBuildState("none", "apply failed: "+err.Error())
 		claimPending.Store(false)
