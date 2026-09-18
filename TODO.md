@@ -191,10 +191,17 @@ Note: the Sympozium API (`.212`) and the serving agents (`.213`/`.214`/`.222`)
   of what the book cites. Merge (open a PR) before print, or have every "Open the
   repo" block name the branch explicitly. *Source: Chapter 17, found 18 September
   while committing this file.*
-- [ ] **Sev3 — the warm pool standby is off and points at a March `:latest`
-  image;** the 194 ms claim is from June and unre-measured. Rebuild the image, or
-  point `POOL_STANDBY_MANIFEST` at the warm manifest (and fix the pool's
-  node-count readiness check first — same ghost-node bug as §5). *Source: Chapter 9.*
+- [x] **Fixed 18 September — the warm pool pointed at a stale March `:latest`
+  image and had never been re-measured.** `POOL_STANDBY_MANIFEST` now defaults to
+  `target-cluster-warm.yaml` (`run-ui.sh`), with CA/token seeding added to
+  `buildStandby` in `pool.go` so KThrees adopts the baked material; `pool.go`'s
+  `targetNodesReady` now counts nodes by name, not by count, so a ghost node from
+  the `:warm` image's bake VM can't falsely satisfy readiness (same class of bug as
+  §5, confirmed live in this code path too, not just the standalone scripts). Claim
+  re-measured, three clean runs: 1.059 s / 0.467 s / 0.465 s — **median 467 ms**
+  (was 194 ms in June). Still ~72x faster than a cold build. The pool itself remains
+  opt-in (`POOL_ENABLED`, default off) — this fixes what happens when it's on, not
+  the default. *Source: Chapter 9.*
 
 ## 7. Stranded / stale components
 
