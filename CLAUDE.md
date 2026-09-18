@@ -403,10 +403,10 @@ The UI is deployed to the `kubeui` namespace on cluster2 (`ui/k8s/kubeui.yaml`):
   **v1.37.0+k3s1**, `ui/backend`'s `client-go`/`k8s.io/api`/`apimachinery` 0.36.2 ->
   **0.37.0**. Both Kind clusters were fully deleted and recreated (no in-place Kind
   upgrade path exists) — everything downstream was rebuilt from scratch: KubeVirt
-  v1.9.0 + CDI v1.66.0 (**these, plus the `ubuntu-noble-dv` base-image DataVolume and
-  the `cluster1`/`cluster2` Kind clusters themselves, are NOT created by any script in
-  this repo** — they're manual prerequisites per the README, easy to forget when
-  reproducing this), MetalLB, CAPI/CAPK/cluster-api-k3s providers, the `:warm` golden
+  v1.9.0 + CDI v1.66.0 and the `cluster1`/`cluster2` Kind clusters themselves
+  (**these are NOT created by any script in this repo** — they're manual
+  prerequisites per the README, easy to forget when reproducing this), MetalLB,
+  CAPI/CAPK/cluster-api-k3s providers, the `:warm` golden
   image, target-cluster, all of `07-istio-advanced` (prereqs through act5), and
   Sympozium 0.10.75. Full re-verification: `make istio-adv-verify` 22/22,
   `make verify` clean, live chat completions through all three Sympozium agents.
@@ -443,8 +443,17 @@ The UI is deployed to the `kubeui` namespace on cluster2 (`ui/k8s/kubeui.yaml`):
      equivalent Deployments ran successfully before this rebuild) — now done
      automatically by `init-management-cluster.sh` right after `clusterctl init`.
   4. **`scripts/configure-kubevirt-perf.sh`'s auto-run from `init-management-cluster.sh`
-     can silently no-op** (`|| true` swallows the failure) if it races KubeVirt's own
-     operator still initializing. Verify `supportContainerResources` actually landed
+     can be skipped entirely if `init-management-cluster.sh` itself is killed before
+     reaching that step.** During the 2026-09-16 rebuild this was first misdiagnosed as
+     a race with KubeVirt's own operator still initializing — the evidence doesn't
+     support that: the setup script's own readiness waits for the k3s providers
+     (finding 3, stuck on the dead proxy image) can each run up to 600 seconds, and the
+     agent invocation running the script that day was under a 590-second time limit,
+     which killed it mid-wait, before it ever reached the `configure-kubevirt-perf.sh`
+     call at the end — and because the output was piped through `tail`, the run still
+     reported success (the exit code belonged to `tail`, not the killed script). Corrected
+     2026-09-18; see `book/chapters/17-the-day-we-upgraded-everything.md`. Regardless of
+     cause, verify `supportContainerResources` actually landed
      (`kubectl get kubevirt kubevirt -n kubevirt -o jsonpath='{.spec.configuration.supportContainerResources}'`)
      after any fresh `make capi-init`; re-run `make kubevirt-perf` by hand if empty.
   5. Fresh `AgentRun`s created concurrently by `fix-web-proxy-image.sh` can race
@@ -452,6 +461,15 @@ The UI is deployed to the `kubeui` namespace on cluster2 (`ui/k8s/kubeui.yaml`):
      "controller does not retry a terminal Failed run" gap noted elsewhere in this
      file. `kubectl delete agentrun <name>-web-endpoint` and let the controller
      regenerate it.
+  6. **The `ubuntu-noble-dv` base-image DataVolume above IS created by a script —
+     `scripts/import-base-images.sh` — contradicting an earlier version of this
+     paragraph.** It also creates a second, minimal base image, `ubuntu-minimal-noble-dv`
+     (source for `make bake-image-minimal-preinit`), which was **not** re-imported on the
+     rebuilt cluster2 and is still missing as of 2026-09-18. The script itself is sound
+     (idempotent, gated on DV `Succeeded`) but isn't wired into the Makefile, the README,
+     or any other doc on the normal setup path — it's mentioned only in
+     `docs/sub-60s-cluster-strategy.md`, a post-mortem about a different problem. Run it
+     by hand after any Kind rebuild: `./scripts/import-base-images.sh` (~3 min, ~900 MB).
 - The backend uses `go run .` in development — no pre-compilation needed
 - The `CLAUDE_DIR` env var is passed to the backend so it can find repo scripts (e.g., for `kubectl apply`)
 - `target-cluster-kubeconfig` is a plain file in the repo root — used by `make istio` and verification scripts
