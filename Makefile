@@ -1,4 +1,4 @@
-.PHONY: kubevirt-perf phase-timings all prereqs metallb capi-init target-cluster target-cluster-lite target-cluster-full target-cluster-parallel target-cluster-preinit target-cluster-lite-preinit target-cluster-full-preinit target-cluster-lite-minimal target-cluster-full-minimal verify clean ui ui-build registry bake-image bake-image-preinit bake-image-minimal-preinit build-containerdisk-preinit build-containerdisk-minimal-preinit demo help registry-fix pre-pull pre-pull-preinit pre-pull-minimal-preinit bake-image-warm build-containerdisk-warm pre-pull-warm ensure-warm-image target-cluster-warm time-to-ready time-to-ready-warm istio security-agent security-agent-build security-policies security-deploy sympozium-install sympozium-lb sympozium-pack-install sympozium-pack-uninstall sympozium-demo-agents sympozium-warm sympozium-demo sympozium-demo-clean sympozium-fix-node-probe sympozium-fix-llmfit-gpu
+.PHONY: kubevirt-perf phase-timings all prereqs metallb capi-init target-cluster target-cluster-lite target-cluster-full target-cluster-parallel target-cluster-preinit target-cluster-lite-preinit target-cluster-full-preinit target-cluster-lite-minimal target-cluster-full-minimal verify clean ui ui-build registry bake-image bake-image-preinit bake-image-minimal-preinit build-containerdisk-preinit build-containerdisk-minimal-preinit demo help registry-fix pre-pull pre-pull-preinit pre-pull-minimal-preinit bake-image-warm build-containerdisk-warm pre-pull-warm ensure-warm-image target-cluster-warm time-to-ready time-to-ready-warm time-to-ready-by-name istio security-agent security-agent-build security-policies security-deploy sympozium-install sympozium-lb sympozium-pack-install sympozium-pack-uninstall sympozium-demo-agents sympozium-warm sympozium-demo sympozium-demo-clean sympozium-fix-node-probe sympozium-fix-llmfit-gpu
 
 REGISTRY_URL := 172.18.0.2:5000
 CONTAINER_IMAGE := $(REGISTRY_URL)/ubuntu-noble-k3s:latest
@@ -14,7 +14,7 @@ help:
 	@echo ""
 	@echo "Cluster Lifecycle:"
 	@echo "  make all                  - Full setup (prereqs + metallb + capi + cluster)"
-	@echo "  make target-cluster               - Deploy target cluster (WARM fast-path, parallel boot, ~40s target)"
+	@echo "  make target-cluster               - Deploy target cluster (WARM fast-path, parallel boot; measured 33.7s median, both nodes)"
 	@echo "  make target-cluster-warm          - Warm fast-path explicitly (seeds CA/token, :warm image)"
 	@echo "  make target-cluster-lite          - Legacy lite (2 CPU · 4Gi, :latest image)"
 	@echo "  make target-cluster-full          - Legacy full (4 CPU · 8/6Gi, :latest image)"
@@ -44,9 +44,24 @@ help:
 	@echo "  make pre-pull-minimal-preinit            - Pre-pull Minimal :preinit on Kind nodes"
 	@echo "  make registry                            - List images in local registry"
 	@echo ""
-	@echo "Pre-init verification (Phase 1):"
+	@echo "Measurement:"
 	@echo "  make target-cluster-preinit      - Deploy test manifest pointing at :preinit image"
-	@echo "  make time-to-ready               - Measure target-cluster boot time"
+	@echo "  make time-to-ready               - Measure boot time (COUNTS nodes; a :warm ghost node can stop the clock early)"
+	@echo "  make time-to-ready-by-name       - Measure boot time by node NAME (correct for the :warm ghost node)"
+	@echo "  make phase-timings               - Per-phase breakdown of a cluster build (read-only, no SSH)"
+	@echo "  make kubevirt-perf               - Apply KubeVirt support-container CPU limits (cluster state, not manifest state)"
+	@echo ""
+	@echo "Istio (advanced, five acts on cluster1 + cluster2):"
+	@echo "  make istio-adv-prereqs    - MetalLB + Gateway API + Istio 1.31 ambient on cluster1"
+	@echo "  make istio-adv-install    - Install the five-act demo resources"
+	@echo "  make istio-adv-act1       - Act 1: Gateway API (TLS, canary, header routing, tenant isolation)"
+	@echo "  make istio-adv-act2       - Act 2: waypoints (L7 authorization on SPIFFE identity)"
+	@echo "  make istio-adv-act3       - Act 3: multicluster failover"
+	@echo "  make istio-adv-act4       - Act 4: AI gateway in front of the host models"
+	@echo "  make istio-adv-act5       - Act 5: observability (Kiali + Prometheus)"
+	@echo "  make istio-adv-demo       - Run all five acts in order"
+	@echo "  make istio-adv-verify     - Run the 22 assertions"
+	@echo "  make istio-adv-clean      - Remove the advanced demo resources"
 	@echo ""
 	@echo "Web UI:"
 	@echo "  make ui             - Run the web UI (frontend + backend)"
@@ -229,6 +244,9 @@ ensure-warm-image: registry-fix
 target-cluster-warm: registry-fix ensure-warm-image
 	./scripts/seed-cluster-secrets.sh
 	kubectl apply -f 03-target-cluster/target-cluster-warm.yaml
+
+time-to-ready-by-name:
+	./scripts/time-to-ready-by-name.sh $(MANIFEST) $(if $(RUNS),--runs $(RUNS),)
 
 time-to-ready:
 	./scripts/time-to-ready.sh
