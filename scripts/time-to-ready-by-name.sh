@@ -31,9 +31,20 @@
 # Requires: kubectl, clusterctl.
 set -euo pipefail
 
-MANIFEST="${1:-03-target-cluster/target-cluster-warm.yaml}"
+# Accept the manifest and --runs in any order, so that both of these work:
+#   ./scripts/time-to-ready-by-name.sh --runs 3
+#   ./scripts/time-to-ready-by-name.sh 03-target-cluster/target-cluster-warm.yaml --runs 3
+# The earlier version took the manifest positionally first, so `--runs 3` alone
+# was read as a filename and died with "manifest not found: --runs".
+MANIFEST="03-target-cluster/target-cluster-warm.yaml"
 RUNS=1
-if [ "${2:-}" = "--runs" ]; then RUNS="${3:-1}"; fi
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --runs) RUNS="${2:-1}"; shift 2 ;;
+    --runs=*) RUNS="${1#*=}"; shift ;;
+    *) MANIFEST="$1"; shift ;;
+  esac
+done
 
 CLUSTER_NAME="${CLUSTER_NAME:-target-cluster}"
 TIMEOUT="${TIMEOUT:-300}"
