@@ -147,6 +147,14 @@ two one-line config fixes, neither of them an image change (50.0s -> 34.5s, -31%
    worker's `kubelet-arg: cloud-provider=external`: with no CCM its
    `node.cloudprovider.kubernetes.io/uninitialized` taint was never removed, so the
    worker was `NoSchedule` and k3s-agent crash-looped every 15 min.
+   That exposed that **VM-to-VM traffic had never worked**: KubeVirt bridge binding gives
+   each guest its node's pod /24 as on-link, and kindnet (L3, no proxy ARP) never answers
+   the ARP. So flannel VXLAN and every cross-node pod flow were broken, hidden by the
+   taint keeping all pods on the CP. **Fixed** by `/usr/local/sbin/pod-subnet-via-gateway.sh`
+   in both bootstraps (warm, warm.tmpl, parallel), which routes the two /25 halves via the
+   gateway. It must run on BOTH VMs, since routing one side leaves the reply ARPing. The
+   legacy KThrees-generated paths (`target-cluster.yaml`, `-lite`) are not fixed. See
+   `docs/sub-60s-cluster-strategy.md` §8-9.
 
 **Re-measured 2026-09-17 after the Kubernetes/Istio/k3s upgrade** (Kind node image
 1.35.0 -> 1.37.0, k3s v1.31.4+k3s1 -> v1.37.0+k3s1, cluster2 fully rebuilt): both nodes

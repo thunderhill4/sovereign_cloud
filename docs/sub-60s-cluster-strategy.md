@@ -497,3 +497,41 @@ VXLAN between the nodes has no path. metrics-server has always failed to scrape 
 (`no route to host`), and now CoreDNS can land on the worker where CP pods cannot reach it.
 Before this change the taint hid it by keeping everything on the CP. **Open; not a timing
 issue.**
+
+---
+
+## 9. VM-to-VM networking fixed (2026-09-23) — and why §6 "dead end 4" looked like a blackhole
+
+**Root cause.** KubeVirt bridge binding gives the guest its launcher pod's address *with
+the Kind node's pod prefix* (`10.244.0.211/24`), so the guest treats every other pod on
+that node — including the other target-cluster VM — as on-link and ARPs for it. kindnet
+routes pods at L3 (point-to-point veths, no proxy ARP), so the ARP never resolves.
+
+**Why routing via the gateway "still blackholed" in §6.** A capture on the Kind node
+showed the node forwarding the worker's SYN correctly out of the CP's veth — and the CP
+never answering, because *its reply* to the worker was still on-link and ARPed into the
+void. §6 routed only one side. With the gateway route on **both** VMs: TCP 6443 -> 200,
+ICMP 0% loss.
+
+**Fix.** `/usr/local/sbin/pod-subnet-via-gateway.sh`, shipped in both bootstraps
+(`kthreesConfigSpec.files` + first `preK3sCommands` on the CP; `write_files` + first
+`runcmd` on the worker) in warm, warm.tmpl and parallel. It adds the two half-prefixes of
+each on-link subnet via the default gateway — more specific than the kernel's connected
+/24, which DHCP keeps owning — computed from the live route table, since the prefix
+depends on which Kind node the VM lands on. No rebake.
+
+**Verified on a cluster built only from the manifests:** both VMs carry the /25 routes;
+VM<->VM 0% loss; a pod on the CP node resolves DNS through CoreDNS on the worker and pings
+it across nodes (flannel VXLAN, 0% loss, ~0.5ms); `kubectl top nodes` reports both nodes
+(metrics-server on the worker scraping the CP); `make verify` passes. Timing unaffected:
+**30.0 / 28.8 / 28.7s, median 28.8s**.
+
+**Not covered:** the legacy KThrees-generated paths (`target-cluster.yaml`, `-lite`,
+`target-cluster.tmpl.yaml`) don't carry the script, and their workers also can't reach the
+CP VM. Port it to their `preK3sCommands` if those paths are kept.
+
+**Caveat:** the routes are runtime state. They survive DHCP renewals, but a
+`systemd-networkd` restart drops foreign routes (`ManageForeignRoutes=yes` by default).
+A VM restart is fine — a containerDisk VM re-runs cloud-init from scratch. Baking the
+script into the image as a networkd-dispatcher hook (lever 3's rebake) would make it
+durable.

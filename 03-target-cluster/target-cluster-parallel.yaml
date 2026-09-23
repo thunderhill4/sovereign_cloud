@@ -86,7 +86,43 @@ spec:
         - traefik
       tlsSan:
         - 172.18.255.215
+    # VM<->VM reachability fix; see the script header and
+    # docs/sub-60s-cluster-strategy.md §9. Runs first in preK3sCommands.
+    files:
+      - path: /usr/local/sbin/pod-subnet-via-gateway.sh
+        owner: root:root
+        permissions: "0755"
+        content: |
+          #!/bin/sh
+          # pod-subnet-via-gateway.sh — make the other target-cluster VM reachable.
+          #
+          # KubeVirt bridge binding hands the guest its launcher pod's address WITH the
+          # Kind node's pod prefix (e.g. 10.244.0.211/24), so the guest treats every other
+          # pod on that node — including the other target-cluster VM — as on-link and ARPs
+          # for it. kindnet routes pods at L3 (point-to-point veths, no proxy ARP), so that
+          # ARP never resolves: VM<->VM was 100% loss in both directions, which broke
+          # flannel VXLAN and every cross-node pod flow (DNS to a CoreDNS on the other
+          # node, metrics-server scraping the worker). Routing only ONE side via the
+          # gateway is not enough — the reply still ARPs — so every VM runs this.
+          #
+          # Adds the two half-prefixes of each on-link subnet via the default gateway;
+          # being more specific, they win over the kernel's connected /24, which is left
+          # in place (DHCP owns it). The gateway itself keeps its DHCP host route.
+          # Computed from the live route table, not hardcoded: the prefix depends on which
+          # Kind node the VM lands on. Idempotent (ip route replace).
+          set -eu
+          dev=$(ip -4 route show default | awk '{print $5; exit}')
+          gw=$(ip -4 route show default | awk '{print $3; exit}')
+          [ -n "$dev" ] && [ -n "$gw" ] || exit 0
+          ip -4 route show dev "$dev" proto kernel scope link | awk -v d="$dev" -v g="$gw" '
+            { split($1, a, "/"); if (a[2] >= 31) next
+              p = a[2] + 1; split(a[1], o, ".")
+              n = ((o[1] * 256 + o[2]) * 256 + o[3]) * 256 + o[4]; h = 2 ^ (32 - p)
+              for (i = 0; i < 2; i++) { m = n + i * h
+                printf "ip route replace %d.%d.%d.%d/%d via %s dev %s\n",
+                  int(m / 16777216) % 256, int(m / 65536) % 256, int(m / 256) % 256, m % 256, p, g, d } }' | sh
     preK3sCommands:
+      - /usr/local/sbin/pod-subnet-via-gateway.sh
       # Advertise the API VIP, not this VM's pod IP — a KubeVirt VM's pod address
       # is reachable from the node but NOT from other pods, and the worker's k3s
       # agent is itself a pod, so it burns a full 10.000s dial timeout (blocking
@@ -155,6 +191,38 @@ stringData:
     #cloud-config
 
     write_files:
+    -   path: /usr/local/sbin/pod-subnet-via-gateway.sh
+        owner: root:root
+        permissions: '0755'
+        content: |
+          #!/bin/sh
+          # pod-subnet-via-gateway.sh — make the other target-cluster VM reachable.
+          #
+          # KubeVirt bridge binding hands the guest its launcher pod's address WITH the
+          # Kind node's pod prefix (e.g. 10.244.0.211/24), so the guest treats every other
+          # pod on that node — including the other target-cluster VM — as on-link and ARPs
+          # for it. kindnet routes pods at L3 (point-to-point veths, no proxy ARP), so that
+          # ARP never resolves: VM<->VM was 100% loss in both directions, which broke
+          # flannel VXLAN and every cross-node pod flow (DNS to a CoreDNS on the other
+          # node, metrics-server scraping the worker). Routing only ONE side via the
+          # gateway is not enough — the reply still ARPs — so every VM runs this.
+          #
+          # Adds the two half-prefixes of each on-link subnet via the default gateway;
+          # being more specific, they win over the kernel's connected /24, which is left
+          # in place (DHCP owns it). The gateway itself keeps its DHCP host route.
+          # Computed from the live route table, not hardcoded: the prefix depends on which
+          # Kind node the VM lands on. Idempotent (ip route replace).
+          set -eu
+          dev=$(ip -4 route show default | awk '{print $5; exit}')
+          gw=$(ip -4 route show default | awk '{print $3; exit}')
+          [ -n "$dev" ] && [ -n "$gw" ] || exit 0
+          ip -4 route show dev "$dev" proto kernel scope link | awk -v d="$dev" -v g="$gw" '
+            { split($1, a, "/"); if (a[2] >= 31) next
+              p = a[2] + 1; split(a[1], o, ".")
+              n = ((o[1] * 256 + o[2]) * 256 + o[3]) * 256 + o[4]; h = 2 ^ (32 - p)
+              for (i = 0; i < 2; i++) { m = n + i * h
+                printf "ip route replace %d.%d.%d.%d/%d via %s dev %s\n",
+                  int(m / 16777216) % 256, int(m / 65536) % 256, int(m / 256) % 256, m % 256, p, g, d } }' | sh
     -   path: /etc/rancher/k3s/config.yaml
         owner: root:root
         permissions: '0640'
@@ -168,6 +236,8 @@ stringData:
           token: f00dcafef00dcafef00dcafef00dcafe
 
     runcmd:
+      # VM<->VM reachability fix (see /usr/local/sbin/pod-subnet-via-gateway.sh).
+      - /usr/local/sbin/pod-subnet-via-gateway.sh
       - "mkdir -p /home/ubuntu/.ssh && echo 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCoeg4clbqLvjstCxtDiDm2hJymy5EeT75HsTMBguKHKPAWcYJDqhakiFF/cxhBoDTLOv6OpfDzCeRoxy0BLFJjQdVNwe7tDl51w+lGG+UR48xATIEEfGxyw8wCjZvML5BnVwdDGyQKFJijZqTlf51hY1FS9x7jg4pVGgNPhf815JHTRsEmzVFgAFK+C5YVl0EYCfII9qpDR7EPECoZngZ5SaMTHLYOVxYBnqrPovuzHD04iemnIuDQKLy4hBYzFMygKkbiKNOYUsuoSsubhtYCtj5KzmV+DpSSIG9YCPC53mjxJ7QiS5/QV9aBEM/0qfVb0aXGhQdjlQ1NoGjeNAMDYsRKDoFNESwYhS39AnXr/ke9nk+4kS0SPYIGqsOMrffJ2e4qzuHOsVjzhCe6rsEwoUufmgzseE+RPVFNxu948cBG6haJde6uqMXe2eq1tKvczYCS9sN8bM8Pb/SmEJDFy7S5I4oaZvsxzotwEEEmgZ+cP92sBZeZefY8LTUmfB0= mahipal' > /home/ubuntu/.ssh/authorized_keys && chown -R ubuntu:ubuntu /home/ubuntu/.ssh && chmod 700 /home/ubuntu/.ssh && chmod 600 /home/ubuntu/.ssh/authorized_keys"
       # Start the agent only once the CP supervisor can serve agent config.
       # k3s's agent-config loop retries on wait.JitterUntil(5s, jitter 1.0) — a
