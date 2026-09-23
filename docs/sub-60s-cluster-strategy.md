@@ -378,3 +378,52 @@ median: the pipeline is now predictable enough that a 1s regression is visible.
 
 Run-to-run spread on this host is **~6s** (baseline 46.6–52.7). With N=3 that swamps
 any lever smaller than ~5s. Anything finer needs N≥7, or a quiet host, or both.
+
+---
+
+## 7. The CAPI chain after the September upgrade (2026-09-23) — a CAPK watch bug
+
+Same-session baseline (`scripts/time-to-ready-by-name.sh --runs 3`, warm manifest,
+upstream CAPK v0.11.2): **31.3 / 33.2 / 62.8s**. The 62.8s run was not guest-side:
+the control-plane VM was created 30s after its bootstrap data was ready, while the
+worker VM (static bootstrap) appeared at +5s.
+
+Two stacked CAPK bugs, both from CAPK v0.11.2 being built against CAPI v1.11 while
+still watching the **v1beta1** API types:
+
+1. **All three CAPK watches are dead.** `KubevirtMachine<-Machine`,
+   `KubevirtMachine<-Cluster`, `KubevirtCluster<-Cluster` watch v1beta1 objects, but
+   CAPI v1.11's `util.MachineToInfrastructureMapFunc`, `util.ClusterToInfrastructureMapFunc`
+   and the cluster predicates type-assert `*v1beta2` objects. The assertion fails on
+   every event, so nothing is ever enqueued. CAPK learns that
+   `Machine.Spec.Bootstrap.DataSecretName` is set only when an unrelated event or a
+   10-20s `RequeueAfter` happens to fire (observed: 20.5s in one run).
+2. **The "waiting for bootstrap data" path dials the target API.** `reconcileNormal`
+   returns a zero result while waiting, which falls through to `updateNodeProviderID`
+   and a workload-API call to the VIP — before any VM exists. With no backend, the dial
+   fails in anything from 2s (`connection refused`) to the full 30s client-go dial
+   timeout (`i/o timeout`), and the reconcile is blocked for all of it.
+
+Across the three baseline runs, "bootstrap data ready -> CP VM created" was
+**2.0 / 11.2 / 30.0s** — the entire run-to-run spread.
+
+**Fix:** `02-capi-init/patch-capk.sh` (`make capk-patch`, auto-run from
+`init-management-cluster.sh`) builds CAPK from `capk-patches/<tag>.patch` — watch the
+v1beta2 types, skip the providerID lookup while no bootstrap data exists, bound
+workload-API calls to 5s — and layers only the binary onto the official image.
+Keyed to the installed CAPK tag; on any other tag it warns and does nothing.
+**Cluster state, not manifest state: re-run after any cluster2 rebuild.**
+
+| CAPK | both nodes Ready (s) | median | spread |
+|---|---|---|---|
+| upstream v0.11.2 | 31.3 / 33.2 / 62.8 | 33.2 | 31.5 |
+| patched | 34.4 / 32.8 / 33.4 | 33.4 | **1.6** |
+
+**This is a tail fix, not a median win.** A lucky upstream run was already ~33s; the
+patch makes every run that. Chain after the fix: VIP assigned / KubevirtCluster Ready
++3s, Machines +4-5s, CP bootstrap secret +6s, both VMs +6-7s.
+
+**Measurement fix found on the way:** `time-to-ready-by-name.sh` polled with
+`kubectl` and no request timeout, so its own dial to the backend-less VIP could hang
+and overstate the result (seen: node Ready timestamps +24s/+31s, script 34.8s for both).
+It now uses `--request-timeout=2s`. The A/B above was measured after that fix.

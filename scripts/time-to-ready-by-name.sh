@@ -81,8 +81,12 @@ run_once() {
   while :; do
     if clusterctl get kubeconfig "$CLUSTER_NAME" > "$kc" 2>/dev/null && [ -s "$kc" ]; then
       # name=ReadyStatus, one per line
+      # --request-timeout bounds the poll. Until the CP VM exists, the VIP has no
+      # backend and a dial to it can blackhole for client-go's 30s default, so an
+      # unbounded poll overstated time-to-ready by ~4s (measured 2026-09-23: node
+      # Ready timestamps +24s/+31s, script reported 34.8s for both).
       local lines
-      lines=$(kubectl --kubeconfig="$kc" get nodes \
+      lines=$(kubectl --kubeconfig="$kc" --request-timeout=2s get nodes \
         -o 'jsonpath={range .items[*]}{.metadata.name}={.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' \
         2>/dev/null || true)
 

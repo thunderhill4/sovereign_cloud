@@ -1,4 +1,4 @@
-.PHONY: kubevirt-perf phase-timings all prereqs metallb capi-init target-cluster target-cluster-lite target-cluster-full target-cluster-parallel target-cluster-preinit target-cluster-lite-preinit target-cluster-full-preinit target-cluster-lite-minimal target-cluster-full-minimal verify clean ui ui-build registry bake-image bake-image-preinit bake-image-minimal-preinit build-containerdisk-preinit build-containerdisk-minimal-preinit demo help registry-fix pre-pull pre-pull-preinit pre-pull-minimal-preinit bake-image-warm build-containerdisk-warm pre-pull-warm ensure-warm-image target-cluster-warm time-to-ready time-to-ready-warm time-to-ready-by-name istio security-agent security-agent-build security-policies security-deploy sympozium-install sympozium-lb sympozium-pack-install sympozium-pack-uninstall sympozium-demo-agents sympozium-warm sympozium-demo sympozium-demo-clean sympozium-fix-node-probe sympozium-fix-llmfit-gpu
+.PHONY: kubevirt-perf capk-patch phase-timings all prereqs metallb capi-init target-cluster target-cluster-lite target-cluster-full target-cluster-parallel target-cluster-preinit target-cluster-lite-preinit target-cluster-full-preinit target-cluster-lite-minimal target-cluster-full-minimal verify clean ui ui-build registry bake-image bake-image-preinit bake-image-minimal-preinit build-containerdisk-preinit build-containerdisk-minimal-preinit demo help registry-fix pre-pull pre-pull-preinit pre-pull-minimal-preinit bake-image-warm build-containerdisk-warm pre-pull-warm ensure-warm-image target-cluster-warm time-to-ready time-to-ready-warm time-to-ready-by-name istio security-agent security-agent-build security-policies security-deploy sympozium-install sympozium-lb sympozium-pack-install sympozium-pack-uninstall sympozium-demo-agents sympozium-warm sympozium-demo sympozium-demo-clean sympozium-fix-node-probe sympozium-fix-llmfit-gpu
 
 REGISTRY_URL := 172.18.0.2:5000
 CONTAINER_IMAGE := $(REGISTRY_URL)/ubuntu-noble-k3s:latest
@@ -50,6 +50,7 @@ help:
 	@echo "  make time-to-ready-by-name       - Measure boot time by node NAME (correct for the :warm ghost node)"
 	@echo "  make phase-timings               - Per-phase breakdown of a cluster build (read-only, no SSH)"
 	@echo "  make kubevirt-perf               - Apply KubeVirt support-container CPU limits (cluster state, not manifest state)"
+	@echo "  make capk-patch                  - Run patched CAPK controller (fixes dead watches; cluster state, re-run after rebuild)"
 	@echo ""
 	@echo "Istio (advanced, five acts on cluster1 + cluster2):"
 	@echo "  make istio-adv-prereqs    - MetalLB + Gateway API + Istio 1.31 ambient on cluster1"
@@ -129,6 +130,9 @@ target-cluster-full-minimal:
 
 kubevirt-perf: ## Raise KubeVirt support-container CPU limits (containerDisk start 8s -> 1s)
 	./scripts/configure-kubevirt-perf.sh
+
+capk-patch: ## Run patched CAPK (fixes dead v1beta1 watches; removes 2-30s CP VM-create stall)
+	./02-capi-init/patch-capk.sh
 
 phase-timings: ## Per-phase breakdown of target-cluster time-to-ready (READ-ONLY collectors)
 	./scripts/phase-timings.sh $(ARGS)

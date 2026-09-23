@@ -40,6 +40,11 @@ for ns in capi-k3s-bootstrap-system capi-k3s-control-plane-system; do
   fi
 done
 
+# CAPK v0.11.2 watches v1beta1 types that CAPI v1.11's helpers never match, so
+# it misses the "bootstrap data ready" event and stalls control-plane VM
+# creation 2-30s per deploy. Swap in the patched build; see patch-capk.sh.
+bash "$(dirname "${BASH_SOURCE[0]}")/patch-capk.sh" || echo "WARN: patch-capk.sh failed; CAPK left unpatched" >&2
+
 echo "==> Waiting for CAPI core controller..."
 kubectl wait --for=condition=available deployment/capi-controller-manager \
   -n capi-system --timeout=300s

@@ -128,6 +128,17 @@ two one-line config fixes, neither of them an image change (50.0s -> 34.5s, -31%
    qemu on every VM start. Raised to 1 core by `scripts/configure-kubevirt-perf.sh`
    (`make kubevirt-perf`, auto-run from `02-capi-init/init-management-cluster.sh`).
    **This is cluster state, not manifest state — re-run it after any cluster2 rebuild.**
+3. **Patched CAPK controller** (2026-09-23, tail fix, not a median win). Upstream CAPK
+   v0.11.2's watches are dead under CAPI v1.11 (it watches v1beta1 types; CAPI's helpers
+   assert v1beta2), and while waiting for bootstrap data it dials the backend-less VIP
+   (up to a 30s timeout). Together they stalled control-plane VM creation 2-30s per
+   deploy: upstream 31.3 / 33.2 / 62.8s vs patched 34.4 / 32.8 / 33.4s (spread 31.5s ->
+   1.6s). `02-capi-init/patch-capk.sh` (`make capk-patch`, auto-run from
+   `init-management-cluster.sh`) builds from `02-capi-init/capk-patches/<tag>.patch`,
+   pushes `capk-manager:<tag>-kubeui2` to the local registry and does nothing on an
+   unpatched tag. **Also cluster state — re-run after any cluster2 rebuild.** Rollback:
+   `kubectl -n capk-system set image deploy/capk-controller-manager manager=quay.io/capk/capk-manager:v0.11.2`.
+   Details: `docs/sub-60s-cluster-strategy.md` §7.
 
 **Re-measured 2026-09-17 after the Kubernetes/Istio/k3s upgrade** (Kind node image
 1.35.0 -> 1.37.0, k3s v1.31.4+k3s1 -> v1.37.0+k3s1, cluster2 fully rebuilt): both nodes

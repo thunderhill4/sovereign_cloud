@@ -1,0 +1,103 @@
+diff --git a/controllers/kubevirtcluster_controller.go b/controllers/kubevirtcluster_controller.go
+index 4869f43..a7e71ec 100644
+--- a/controllers/kubevirtcluster_controller.go
++++ b/controllers/kubevirtcluster_controller.go
+@@ -31,6 +31,7 @@ import (
+ 	"k8s.io/apimachinery/pkg/runtime/schema"
+ 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+ 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta1" //nolint SA1019
++	clusterv1beta2 "sigs.k8s.io/cluster-api/api/core/v1beta2"
+ 	"sigs.k8s.io/cluster-api/util"
+ 	"sigs.k8s.io/cluster-api/util/annotations"
+ 	"sigs.k8s.io/cluster-api/util/deprecated/v1beta1/conditions" //nolint SA1019
+@@ -274,7 +275,10 @@ func (r *KubevirtClusterReconciler) SetupWithManager(ctx gocontext.Context, mgr
+ 		WithEventFilter(predicates.ResourceNotPaused(r.Scheme(), r.Log)).
+ 		WithEventFilter(predicates.ResourceIsNotExternallyManaged(r.Scheme(), r.Log)).
+ 		Watches(
+-			&clusterv1.Cluster{},
++			// kubeui fast-path patch: watch the v1beta2 type. CAPI v1.11 util map funcs
++			// and predicates type-assert *v1beta2 objects, so watching v1beta1 made them
++			// return nil for every event and this watch never enqueued anything.
++			&clusterv1beta2.Cluster{},
+ 			handler.EnqueueRequestsFromMapFunc(util.ClusterToInfrastructureMapFunc(
+ 				ctx,
+ 				infrav1.GroupVersion.WithKind("KubevirtCluster"),
+diff --git a/controllers/kubevirtmachine_controller.go b/controllers/kubevirtmachine_controller.go
+index 5e93f99..6e9f9ca 100644
+--- a/controllers/kubevirtmachine_controller.go
++++ b/controllers/kubevirtmachine_controller.go
+@@ -31,7 +31,8 @@ import (
+ 	"k8s.io/apimachinery/pkg/types"
+ 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+ 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta1" //nolint SA1019
+-	capierrors "sigs.k8s.io/cluster-api/errors"          //nolint SA1019
++	clusterv1beta2 "sigs.k8s.io/cluster-api/api/core/v1beta2"
++	capierrors "sigs.k8s.io/cluster-api/errors" //nolint SA1019
+ 	"sigs.k8s.io/cluster-api/util"
+ 	"sigs.k8s.io/cluster-api/util/annotations"
+ 	"sigs.k8s.io/cluster-api/util/deprecated/v1beta1/conditions" //nolint SA1019
+@@ -177,6 +178,15 @@ func (r *KubevirtMachineReconciler) Reconcile(goctx gocontext.Context, req ctrl.
+ 
+ 	// Handle non-deleted machines
+ 	res, err := r.reconcileNormal(machineContext)
++	// kubeui fast-path patch: reconcileNormal also returns a zero result while it is
++	// still waiting for Machine.Spec.Bootstrap.DataSecretName, i.e. before any VM
++	// exists. Falling through to updateNodeProviderID then dials the workload API
++	// VIP, which has no backend yet and can blackhole for the client's 30s dial
++	// timeout, blocking this reconcile past the moment the bootstrap data lands.
++	// No VM means no Node to patch, so skip it; the Machine watch re-triggers us.
++	if err == nil && res.IsZero() && machineContext.Machine.Spec.Bootstrap.DataSecretName == nil {
++		return res, nil
++	}
+ 	if err == nil && res.IsZero() {
+ 		// Update the providerID on the Node
+ 		// The ProviderID on the Node and the providerID on  the KubevirtMachine are used to set the NodeRef
+@@ -516,7 +526,10 @@ func (r *KubevirtMachineReconciler) SetupWithManager(goctx gocontext.Context, mg
+ 		WithOptions(options).
+ 		WithEventFilter(predicates.ResourceNotPaused(r.Scheme(), ctrl.LoggerFrom(goctx))).
+ 		Watches(
+-			&clusterv1.Machine{},
++			// kubeui fast-path patch: watch the v1beta2 type. CAPI v1.11 util map funcs
++			// and predicates type-assert *v1beta2 objects, so watching v1beta1 made them
++			// return nil for every event and this watch never enqueued anything.
++			&clusterv1beta2.Machine{},
+ 			handler.EnqueueRequestsFromMapFunc(util.MachineToInfrastructureMapFunc(infrav1.GroupVersion.WithKind("KubevirtMachine"))),
+ 		).
+ 		Watches(
+@@ -524,7 +537,10 @@ func (r *KubevirtMachineReconciler) SetupWithManager(goctx gocontext.Context, mg
+ 			handler.EnqueueRequestsFromMapFunc(r.KubevirtClusterToKubevirtMachines),
+ 		).
+ 		Watches(
+-			&clusterv1.Cluster{},
++			// kubeui fast-path patch: watch the v1beta2 type. CAPI v1.11 util map funcs
++			// and predicates type-assert *v1beta2 objects, so watching v1beta1 made them
++			// return nil for every event and this watch never enqueued anything.
++			&clusterv1beta2.Cluster{},
+ 			handler.EnqueueRequestsFromMapFunc(clusterToKubevirtMachines),
+ 			builder.WithPredicates(predicates.ClusterPausedTransitionsOrInfrastructureProvisioned(r.Scheme(), ctrl.LoggerFrom(goctx))),
+ 		).
+diff --git a/pkg/workloadcluster/workloadcluster.go b/pkg/workloadcluster/workloadcluster.go
+index b7cc7ac..02e53ea 100644
+--- a/pkg/workloadcluster/workloadcluster.go
++++ b/pkg/workloadcluster/workloadcluster.go
+@@ -1,6 +1,8 @@
+ package workloadcluster
+ 
+ import (
++	"time"
++
+ 	"github.com/pkg/errors"
+ 	corev1 "k8s.io/api/core/v1"
+ 	k8sclient "k8s.io/client-go/kubernetes"
+@@ -41,6 +43,11 @@ func (w *workloadCluster) GenerateWorkloadClusterClient(ctx *context.MachineCont
+ 		return nil, errors.Wrap(err, "failed to create REST config")
+ 	}
+ 
++	// kubeui fast-path patch: bound every workload-API call. client-go's default
++	// dial timeout is 30s, and during bring-up the VIP has no backend, so one dial
++	// can hold a reconcile for 30s. Failing in 5s lets the normal requeue retry.
++	restConfig.Timeout = 5 * time.Second
++
+ 	// create the client
+ 	workloadClusterClient, err := client.New(restConfig, client.Options{Scheme: w.Scheme()})
+ 	if err != nil {
