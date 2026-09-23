@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 330" width="720" height="330"
+     role="img" aria-labelledby="t71 d71" font-family="'Source Serif 4', Georgia, serif">
+  <title id="t71">Figure 7.1 — Where fifty seconds went, and where the image could not help</title>
+  <desc id="d71">A stacked horizontal timeline of the median 50-second cluster build measured on 9 September, divided into six phases. Cluster API controllers creating the VM instance, 6.6 seconds, 14 per cent. Launcher pod created to QEMU running, 10.0 seconds, 21 per cent. Firmware, kernel and initramfs, 3.7 seconds, 8 per cent. Systemd and cloud-init to k3s start, 5.5 seconds, 12 per cent. Control-plane k3s start to the first 200 from readyz, 7.0 seconds, 15 per cent. Worker joining after the API is already answering, 11.8 seconds, 25 per cent. A bracket over the first two phases marks 16.6 seconds, 36 per cent of the wall clock, elapsing before the guest kernel starts — none of it inside the golden image.</desc>
+
+  <style>
+    :root, svg {
+      --ink:#1B2430; --ink2:#4A5563; --ink3:#737C86; --rule:#D6DAD3;
+      --accent:#1F5F4A; --accent-soft:#E3EDE7; --flag:#A8442A;
+    }
+    @media (prefers-color-scheme: dark) {
+      svg {
+        --ink:#E6E8E3; --ink2:#A9B2BA; --ink3:#7E8892; --rule:#2A3642;
+        --accent:#6FB79A; --accent-soft:#17302A; --flag:#E08A6B;
+      }
+    }
+    .seg{stroke:var(--rule);stroke-width:1}
+    .pre{fill:var(--accent);opacity:.30}
+    .post{fill:var(--accent);opacity:.62}
+    .lbl{font-size:12px;fill:var(--ink2)}
+    .num{font-size:12px;fill:var(--ink);font-weight:600;
+         font-family:'IBM Plex Mono',Menlo,Consolas,monospace}
+    .small{font-size:11px;fill:var(--ink3);
+           font-family:'IBM Plex Mono',Menlo,Consolas,monospace}
+    .flag{fill:var(--flag);font-size:12px;font-weight:600}
+    .flagline{stroke:var(--flag);stroke-width:1.5;fill:none}
+    .cap{font-size:12px;fill:var(--ink3);font-style:italic}
+    .hdr{font-size:13px;fill:var(--ink);font-weight:600}
+  </style>
+
+  <text class="hdr" x="20" y="28">Median build, 9 September: 50.0 s (52.7 / 50.0 / 46.6)</text>
+
+  <!-- scale: 50.0 s across 640 px from x=40  => 12.8 px per second -->
+  <!-- bracket: before the guest kernel -->
+  <path class="flagline" d="M40 58 L40 50 L252 50 L252 58"/>
+  <text class="flag" x="146" y="42" text-anchor="middle">16.6 s — 36% before the guest kernel starts</text>
+
+  <!-- bar -->
+  <g class="seg">
+    <rect class="pre"  x="40"    y="64" width="84.5"  height="42"/>
+    <rect class="pre"  x="124.5" y="64" width="128"   height="42"/>
+    <rect class="post" x="252.5" y="64" width="47.4"  height="42"/>
+    <rect class="post" x="299.9" y="64" width="70.4"  height="42"/>
+    <rect class="post" x="370.3" y="64" width="89.6"  height="42"/>
+    <rect class="post" x="459.9" y="64" width="151"   height="42"/>
+  </g>
+  <line class="seg" x1="40" y1="112" x2="640" y2="112" stroke="var(--rule)"/>
+  <g class="small">
+    <text x="40" y="126">0 s</text>
+    <text x="252" y="126" text-anchor="middle">16.6</text>
+    <text x="640" y="126" text-anchor="end">50.0 s</text>
+  </g>
+
+  <!-- legend rows -->
+  <g>
+    <rect class="pre" x="40" y="150" width="14" height="14" stroke="var(--rule)"/>
+    <text class="lbl" x="62" y="162">Cluster API controllers → VM instance created</text>
+    <text class="num" x="560" y="162" text-anchor="end">6.6 s</text>
+    <text class="small" x="640" y="162" text-anchor="end">14%</text>
+
+    <rect class="pre" x="40" y="174" width="14" height="14" stroke="var(--rule)"/>
+    <text class="lbl" x="62" y="186">Launcher pod created → QEMU running</text>
+    <text class="num" x="560" y="186" text-anchor="end">10.0 s</text>
+    <text class="small" x="640" y="186" text-anchor="end">21%</text>
+
+    <rect class="post" x="40" y="198" width="14" height="14" stroke="var(--rule)"/>
+    <text class="lbl" x="62" y="210">Firmware, kernel, initramfs</text>
+    <text class="num" x="560" y="210" text-anchor="end">3.7 s</text>
+    <text class="small" x="640" y="210" text-anchor="end">8%</text>
+
+    <rect class="post" x="40" y="222" width="14" height="14" stroke="var(--rule)"/>
+    <text class="lbl" x="62" y="234">systemd and cloud-init → k3s start</text>
+    <text class="num" x="560" y="234" text-anchor="end">5.5 s</text>
+    <text class="small" x="640" y="234" text-anchor="end">12%</text>
+
+    <rect class="post" x="40" y="246" width="14" height="14" stroke="var(--rule)"/>
+    <text class="lbl" x="62" y="258">Control-plane k3s start → first 200 from /readyz</text>
+    <text class="num" x="560" y="258" text-anchor="end">7.0 s</text>
+    <text class="small" x="640" y="258" text-anchor="end">15%</text>
+
+    <rect class="post" x="40" y="270" width="14" height="14" stroke="var(--rule)"/>
+    <text class="lbl" x="62" y="282">Worker joins, after the API is already answering</text>
+    <text class="num" x="560" y="282" text-anchor="end">11.8 s</text>
+    <text class="small" x="640" y="282" text-anchor="end">25%</text>
+  </g>
+
+  <text class="cap" x="20" y="312">The two pale phases happen before the golden image is even read — which is why every attempt</text>
+  <text class="cap" x="20" y="326">to make the image smarter failed. The coarse estimate had given k3s startup 17 s; it measured 7.0.</text>
+</svg>

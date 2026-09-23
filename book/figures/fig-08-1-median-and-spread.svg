@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 360" width="720" height="360"
+     role="img" aria-labelledby="t81 d81" font-family="'Source Serif 4', Georgia, serif">
+  <title id="t81">Figure 8.1 — Time-to-ready across three stages: the median falls and the spread collapses</title>
+  <desc id="d81">Dot plot of three clean runs at each of three stages. Baseline: 52.7, 50.0 and 46.6 seconds, median 50.0, spread 6.1 seconds. After adding advertise-address: 42.7, 42.8 and 41.2 seconds, median 42.7, spread 1.6 seconds. After also raising the KubeVirt support-container CPU limit: 34.5, 34.2 and 34.7 seconds, median 34.5, spread 0.5 seconds.</desc>
+
+  <!-- Shared visual language for all figures in this book.
+       Theme-aware: light palette on :root, dark redefined under prefers-color-scheme.
+       Self-contained: no external fonts, no external references. -->
+  <style>
+    :root, svg {
+      --ink:#1B2430; --ink2:#4A5563; --ink3:#737C86;
+      --rule:#D6DAD3; --accent:#1F5F4A; --accent-soft:#E3EDE7; --flag:#A8442A;
+    }
+    @media (prefers-color-scheme: dark) {
+      svg {
+        --ink:#E6E8E3; --ink2:#A9B2BA; --ink3:#7E8892;
+        --rule:#2A3642; --accent:#6FB79A; --accent-soft:#17302A; --flag:#E08A6B;
+      }
+    }
+    .ink{fill:var(--ink)} .ink2{fill:var(--ink2)} .ink3{fill:var(--ink3)}
+    .rule{stroke:var(--rule);stroke-width:1}
+    .grid{stroke:var(--rule);stroke-width:1;stroke-dasharray:2 4}
+    .dot{fill:var(--accent);opacity:.55}
+    .med{stroke:var(--accent);stroke-width:3;stroke-linecap:round}
+    .span{stroke:var(--accent);stroke-width:1.5;opacity:.5}
+    .lbl{font-size:13px;fill:var(--ink2)}
+    .num{font-size:13px;fill:var(--ink);font-weight:600;
+         font-family:'IBM Plex Mono',Menlo,Consolas,monospace}
+    .small{font-size:11px;fill:var(--ink3);
+           font-family:'IBM Plex Mono',Menlo,Consolas,monospace}
+    .cap{font-size:12px;fill:var(--ink3);font-style:italic}
+  </style>
+
+  <!-- y axis: seconds. 30s at y=290, 55s at y=40  =>  y = 290 - (s-30)*10 -->
+  <g class="grid">
+    <line x1="92" y1="290" x2="690" y2="290"/><line x1="92" y1="240" x2="690" y2="240"/>
+    <line x1="92" y1="190" x2="690" y2="190"/><line x1="92" y1="140" x2="690" y2="140"/>
+    <line x1="92" y1="90"  x2="690" y2="90"/><line x1="92" y1="40"  x2="690" y2="40"/>
+  </g>
+  <g class="small" text-anchor="end">
+    <text x="84" y="294">30 s</text><text x="84" y="244">35 s</text>
+    <text x="84" y="194">40 s</text><text x="84" y="144">45 s</text>
+    <text x="84" y="94">50 s</text><text x="84" y="44">55 s</text>
+  </g>
+  <line class="rule" x1="92" y1="40" x2="92" y2="290"/>
+
+  <!-- Stage 1 — baseline: 52.7 / 50.0 / 46.6, median 50.0, spread 6.1 -->
+  <g transform="translate(200,0)">
+    <line class="span" x1="0" y1="63" x2="0" y2="124"/>
+    <circle class="dot" cx="0" cy="63"  r="9"/>
+    <circle class="dot" cx="0" cy="90"  r="9"/>
+    <circle class="dot" cx="0" cy="124" r="9"/>
+    <line class="med" x1="-26" y1="90" x2="26" y2="90"/>
+    <text class="num" x="36" y="94">50.0</text>
+    <text class="small" x="36" y="110">spread 6.1</text>
+  </g>
+
+  <!-- Stage 2 — advertise-address: 42.7 / 42.8 / 41.2, median 42.7, spread 1.6 -->
+  <g transform="translate(400,0)">
+    <line class="span" x1="0" y1="162" x2="0" y2="178"/>
+    <circle class="dot" cx="0" cy="162" r="9"/>
+    <circle class="dot" cx="0" cy="163" r="9"/>
+    <circle class="dot" cx="0" cy="178" r="9"/>
+    <line class="med" x1="-26" y1="163" x2="26" y2="163"/>
+    <text class="num" x="36" y="167">42.7</text>
+    <text class="small" x="36" y="183">spread 1.6</text>
+  </g>
+
+  <!-- Stage 3 — + supportContainerResources: 34.5 / 34.2 / 34.7, median 34.5, spread 0.5 -->
+  <g transform="translate(600,0)">
+    <line class="span" x1="0" y1="247" x2="0" y2="252"/>
+    <circle class="dot" cx="0" cy="247" r="9"/>
+    <circle class="dot" cx="0" cy="245" r="9"/>
+    <circle class="dot" cx="0" cy="252" r="9"/>
+    <line class="med" x1="-26" y1="245" x2="26" y2="245"/>
+    <text class="num" x="36" y="249">34.5</text>
+    <text class="small" x="36" y="265">spread 0.5</text>
+  </g>
+
+  <!-- stage labels -->
+  <g class="lbl" text-anchor="middle">
+    <text x="200" y="318">baseline</text>
+    <text x="400" y="318">+ advertise-address</text>
+    <text x="600" y="318">+ CPU limit</text>
+  </g>
+  <g class="small" text-anchor="middle">
+    <text x="200" y="334">9 Sept, N=3</text>
+    <text x="400" y="334">one line</text>
+    <text x="600" y="334">one setting</text>
+  </g>
+
+  <text class="cap" x="92" y="24">Three clean runs per stage. The bar is the median; the thin line is the full spread.</text>
+</svg>

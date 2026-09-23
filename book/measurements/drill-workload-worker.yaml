@@ -1,0 +1,20 @@
+# Workload B — the same pod, pinned to the worker and tolerating the taint that
+# keeps every ordinary workload off it (Chapter 5). Run separately from the
+# timed cycle: this tests CAPABILITY, not recovery speed.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: drill-worker-probe
+  namespace: drill
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: target-cluster-workers-cq6lf-xs4zk
+  tolerations:
+    - key: node.cloudprovider.kubernetes.io/uninitialized
+      operator: Exists
+      effect: NoSchedule
+  containers:
+    - name: web
+      image: rancher/mirrored-library-busybox:1.37.0
+      imagePullPolicy: IfNotPresent
+      command: ["sh","-c","echo ok > /tmp/index.html && httpd -f -p 8080 -h /tmp"]

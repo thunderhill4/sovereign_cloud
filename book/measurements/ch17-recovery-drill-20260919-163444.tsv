@@ -1,0 +1,2 @@
+run	status	mttr_T9_T0	delete_returns_T1_T0	infra_gone_T2_T0	seed_T3_T2	build_both_T6_T4	build_cp_T5_T4	workload_T9_T7	cp_node	worker_node	ghosts	workload_node	pulled	kubesystem_created	load_before	load_after	memav_before
+1	OK	38.16	.06	.19	.74	36.31	25.53	.80	target-cluster-cp-95rbt	target-cluster-workers-m9mm8-xt7pd	 ubuntu-bake-vm-warm	target-cluster-cp-95rbt	0	2026-09-16T07:10:33Z	0.52	1.05	16319

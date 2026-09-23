@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 320" width="720" height="320"
+     role="img" aria-labelledby="t113 d113" font-family="'Source Serif 4', Georgia, serif">
+  <title id="t113">Figure 11.3 — One check, two opposite realities, the same output</title>
+  <desc id="d113">Two terminal panels side by side. On the left, working failover: cluster1's replicas scaled to zero, cluster2 serving, and the act prints success equals 20, failed equals 0. On the right, a total outage: both clusters scaled to zero, nothing serving, and the act prints the identical line, success equals 20, failed equals 0. The reason is shown beneath: the check counts any non-empty response body as a success rather than checking the HTTP status code.</desc>
+
+  <style>
+    :root, svg {
+      --ink:#1B2430; --ink2:#4A5563; --ink3:#737C86; --rule:#D6DAD3;
+      --accent:#1F5F4A; --flag:#A8442A; --panel:#EAEEE8;
+    }
+    @media (prefers-color-scheme: dark) {
+      svg {
+        --ink:#E6E8E3; --ink2:#A9B2BA; --ink3:#7E8892; --rule:#2A3642;
+        --accent:#6FB79A; --flag:#E08A6B; --panel:#1B2732;
+      }
+    }
+    .panel{fill:var(--panel);stroke:var(--rule);stroke-width:1;rx:4}
+    .mono{font-family:'IBM Plex Mono',Menlo,Consolas,monospace;font-size:12px;fill:var(--ink)}
+    .mono-dim{font-family:'IBM Plex Mono',Menlo,Consolas,monospace;font-size:12px;fill:var(--ink3)}
+    .hdr{font-size:13px;fill:var(--ink);font-weight:600}
+    .sub{font-size:12px;fill:var(--ink2)}
+    .flag{fill:var(--flag)}
+    .flagline{stroke:var(--flag);stroke-width:2}
+    .cap{font-size:12px;fill:var(--ink3);font-style:italic}
+    .ok{fill:var(--accent);font-weight:600;
+        font-family:'IBM Plex Mono',Menlo,Consolas,monospace;font-size:12px}
+  </style>
+
+  <!-- LEFT: real failover -->
+  <text class="hdr" x="24" y="28">Failover working</text>
+  <text class="sub" x="24" y="46">cluster1 scaled to 0 · cluster2 serving</text>
+  <rect class="panel" x="24" y="58" width="310" height="132"/>
+  <text class="mono-dim" x="40" y="80">$ ./act3-multicluster/run.sh</text>
+  <text class="mono-dim" x="40" y="100">scaling echo-v1 → 0 replicas (cluster1)</text>
+  <text class="mono-dim" x="40" y="120">20 requests via client-trusted…</text>
+  <text class="ok"       x="40" y="146">success=20  failed=0</text>
+  <text class="mono-dim" x="40" y="172">✓ Traffic failed over to cluster2</text>
+
+  <!-- RIGHT: total outage -->
+  <text class="hdr" x="386" y="28">Total outage</text>
+  <text class="sub" x="386" y="46">both clusters scaled to 0 · nothing serving</text>
+  <rect class="panel" x="386" y="58" width="310" height="132"/>
+  <text class="mono-dim" x="402" y="80">$ ./act3-multicluster/run.sh</text>
+  <text class="mono-dim" x="402" y="100">scaling echo-v1 → 0 (cluster1 + cluster2)</text>
+  <text class="mono-dim" x="402" y="120">20 requests via client-trusted…</text>
+  <text class="ok"       x="402" y="146">success=20  failed=0</text>
+  <text class="mono-dim" x="402" y="172">✓ Traffic failed over to cluster2</text>
+
+  <!-- the identical-output marker -->
+  <line class="flagline" x1="334" y1="146" x2="386" y2="146" stroke-dasharray="4 3"/>
+  <text class="flag" x="360" y="138" text-anchor="middle" font-size="11"
+        font-family="'IBM Plex Mono',Menlo,Consolas,monospace">identical</text>
+
+  <!-- the cause -->
+  <rect class="panel" x="24" y="212" width="672" height="60"/>
+  <text class="sub" x="40" y="234">Why both print the same line — the check never looks at the status code:</text>
+  <text class="mono" x="40" y="256">b=$(call);  if [[ -n "$b" ]];  then okc=$((okc+1));  else failc=$((failc+1));  fi</text>
+
+  <text class="cap" x="24" y="296">Any non-empty response body counts as a success. A check that cannot fail is not a check.</text>
+  <text class="cap" x="24" y="312">Source: 07-istio-advanced/act3-multicluster/run.sh (quoted in Appendix G.4).</text>
+</svg>

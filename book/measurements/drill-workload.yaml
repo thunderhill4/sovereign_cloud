@@ -1,0 +1,62 @@
+# Recovery-drill workload (Chapter 17).
+#
+# Deliberately uses rancher/mirrored-library-busybox, which is BAKED INTO the
+# :warm golden image and present on both nodes of every freshly built target
+# cluster. With imagePullPolicy: IfNotPresent the drill therefore measures the
+# platform, not Docker Hub. An nginx:alpine workload would put a ~26 MB internet
+# pull inside the recovery clock.
+#
+# Workload A (below) is unconstrained: it lands on the control plane, because
+# the worker carries node.cloudprovider.kubernetes.io/uninitialized:NoSchedule
+# and nothing on this platform ever removes it (Chapter 5).
+# Workload B (drill-workload-worker.yaml) tolerates that taint and pins to the
+# worker — the only way to test whether the recovered worker can do any work.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: drill
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: drill-web
+  namespace: drill
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: drill-web
+  template:
+    metadata:
+      labels:
+        app: drill-web
+    spec:
+      containers:
+        - name: web
+          image: rancher/mirrored-library-busybox:1.37.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - "echo ok > /tmp/index.html && httpd -f -p 8080 -h /tmp"
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /index.html
+              port: 8080
+            periodSeconds: 1
+            timeoutSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: drill-web
+  namespace: drill
+spec:
+  selector:
+    app: drill-web
+  ports:
+    - port: 80
+      targetPort: 8080
