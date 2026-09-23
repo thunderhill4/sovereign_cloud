@@ -427,3 +427,73 @@ patch makes every run that. Chain after the fix: VIP assigned / KubevirtCluster 
 `kubectl` and no request timeout, so its own dial to the backend-less VIP could hang
 and overstate the result (seen: node Ready timestamps +24s/+31s, script 34.8s for both).
 It now uses `--request-timeout=2s`. The A/B above was measured after that fix.
+
+---
+
+## 8. The worker join (2026-09-23) — k3s's jittered config retry, and a taint nobody removed
+
+After §7 the budget was: CP Ready ~25.5s, worker Ready 6-9s later. The worker
+journal (read via SSH through cluster2's node netns) showed where the gap went:
+
+```
+06:25:05.1  agent starts; CA fetch fails (CP API not up), retries every 2s
+06:25:10.25 "Waiting to retrieve agent configuration; server is not ready:
+             serving-kubelet.crt: 503"                         <- 0.27s too early
+06:25:10.52 CP: "Kube API server is now running"
+06:25:17.4  agent retries, gets config, starts containerd -> kubelet -> registered 19.3
+```
+
+k3s v1.37's agent-config loop is `wait.JitterUntilWithContext(..., 5*time.Second, 1.0, ...)`
+— a **random 5-10s** between attempts. A first attempt that lands even a fraction of a
+second before the supervisor's runtime core is ready costs 5-10s of idle time, and
+that jitter was also most of the remaining run-to-run spread.
+
+### Dead end 3 revisited — gating the agent now works
+
+§6 recorded gating the agent on CP readiness as a 3.1s *regression* on k3s v1.31,
+because the agent then started containerd *before* fetching config, so the wait
+overlapped useful work. **On v1.37 the order is reversed**: containerd starts only
+after the config arrives (`Running containerd` right after the config fetch), so
+holding the agent back costs nothing.
+
+**Probe choice matters.** First attempt used `/v1-k3s/config` (token auth): it answered
+200 ~2s *before* the CP API was up, so the gate opened early and the agent hit the same
+503 — no gain (32.8s). The 503 comes from the node-password check (`controller == nil`
+-> `ErrCoreNotReady`); probing that directly would create a node-password secret for
+the probe's name. The right probe is the supervisor's own **`/v1-k3s/readyz`** (token
+auth, no side effects), which 503s until `Runtime.Core` is set.
+
+The static worker bootstrap now spins on it every 0.2s (bounded ~5 min) before
+`install.sh agent`. Agent timeline after: CP API up 03.00 -> gate open, agent starts
+03.57 -> containerd 04.98 (no retry) -> registered 06.77.
+
+### The worker was never schedulable
+
+The same journal showed `k3s-agent` failing after exactly 15 minutes with
+`network policy controller failed to wait for node.cloudprovider.kubernetes.io/uninitialized
+taint to be removed`, then restarting forever — and cloud-init blocked on it for ~30 min.
+The static bootstrap passed `kubelet-arg: cloud-provider=external`, but the CP runs
+`disable-cloud-controller: true` with no CCM, so nothing ever removed the taint: the
+worker went Ready but `NoSchedule`, and every pod in the cluster ran on the CP. Removed
+the flag (warm, warm.tmpl, parallel). Worker now untainted, agent `active`,
+cloud-init `done`. No timing effect on its own (median 33.0s).
+
+| change (cumulative, patched CAPK) | both nodes Ready (s) | median |
+|---|---|---|
+| before | 34.4 / 32.8 / 33.4 | 33.4 |
+| drop `cloud-provider=external` | 30.6 / 34.6 / 33.0 | 33.0 |
+| + gate on `/v1-k3s/config` (wrong probe) | 33.9 / 32.8 / 31.6 | 32.8 |
+| + gate on `/v1-k3s/readyz` | 28.9 / 29.0 / 30.8 | **29.0** |
+
+Worker now joins 3.4-4s after the CP (was 6-9s).
+
+### Exposed: cross-node pod networking does not work
+
+With the taint gone, pods schedule on the worker — and it turns out **VM-to-VM traffic
+has never worked**: worker VM -> CP VM IP is 100% loss both ways, the on-link ARP for the
+other VM is `FAILED`, and routing it via the gateway (10.244.0.1) still drops — the same
+blackhole as §6 "dead end 4" (node -> VM works, forwarded pod -> VM does not). So flannel
+VXLAN between the nodes has no path. metrics-server has always failed to scrape the worker
+(`no route to host`), and now CoreDNS can land on the worker where CP pods cannot reach it.
+Before this change the taint hid it by keeping everything on the CP. **Open; not a timing
+issue.**

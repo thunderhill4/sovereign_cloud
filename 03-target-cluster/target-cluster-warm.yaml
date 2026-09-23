@@ -176,9 +176,12 @@ stringData:
     -   path: /etc/rancher/k3s/config.yaml
         owner: root:root
         permissions: '0640'
+        # No `kubelet-arg: cloud-provider=external`: the CP runs with
+        # disable-cloud-controller and no CCM, so nothing ever cleared the
+        # node.cloudprovider.kubernetes.io/uninitialized taint that flag adds.
+        # The worker went Ready but was NoSchedule, and k3s's network-policy
+        # controller waited 15 min on the taint, then crash-looped the agent.
         content: |
-          kubelet-arg:
-          - cloud-provider=external
           server: https://172.18.255.215:6443
           token: f00dcafef00dcafef00dcafef00dcafe
 
@@ -189,6 +192,17 @@ stringData:
       # SERVER unit, which fails ~0.8s later and — because install.sh runs under
       # `set -e` — aborts the script before writing the bootstrap-success sentinel.
       # The env var is kept for the legacy KThrees-generated path.
+      # Start the agent only once the CP supervisor can serve agent config.
+      # k3s's agent-config loop retries on wait.JitterUntil(5s, jitter 1.0) — a
+      # random 5-10s — so a first request that lands even 0.3s early (measured:
+      # 503 at 10.25s, CP API up at 10.52s) wastes 5-10s. On k3s v1.37 the agent
+      # starts containerd only AFTER it has its config, so waiting here costs
+      # nothing (unlike v1.31 — "dead end 3" in docs/sub-60s-cluster-strategy.md).
+      # Probe the supervisor's own /v1-k3s/readyz (token auth, no side effects):
+      # 503 until Runtime.Core is set — the same condition that 503s the agent's
+      # serving-kubelet.crt request. (/v1-k3s/config is NOT gated on it: it answered
+      # 200 ~2s before the API was up.) Bounded at ~5 min, then start anyway.
+      - "for i in $(seq 1 1500); do [ \"$(curl -sk -o /dev/null -w '%{http_code}' --max-time 1 -u node:f00dcafef00dcafef00dcafef00dcafe https://172.18.255.215:6443/v1-k3s/readyz)\" = 200 ] && break; sleep 0.2; done"
       - INSTALL_K3S_SKIP_DOWNLOAD=true INSTALL_K3S_EXEC='agent' sh /opt/install.sh agent && mkdir -p /run/cluster-api && echo success > /run/cluster-api/bootstrap-success.complete
       - "systemctl daemon-reload && systemctl enable k3s-agent && systemctl start k3s-agent"
 ---

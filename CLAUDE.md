@@ -139,6 +139,14 @@ two one-line config fixes, neither of them an image change (50.0s -> 34.5s, -31%
    unpatched tag. **Also cluster state — re-run after any cluster2 rebuild.** Rollback:
    `kubectl -n capk-system set image deploy/capk-controller-manager manager=quay.io/capk/capk-manager:v0.11.2`.
    Details: `docs/sub-60s-cluster-strategy.md` §7.
+4. **Worker agent gated on `/v1-k3s/readyz`** (2026-09-23, 33.0s -> **29.0s** median,
+   28.9 / 29.0 / 30.8). k3s v1.37's agent-config retry is a random 5-10s, so a first
+   request landing just before the CP's runtime core is ready wasted 5-10s. The static
+   worker bootstrap now polls the supervisor's `/v1-k3s/readyz` before starting the
+   agent (NOT `/v1-k3s/config`, which answers 200 ~2s too early). Also dropped the
+   worker's `kubelet-arg: cloud-provider=external`: with no CCM its
+   `node.cloudprovider.kubernetes.io/uninitialized` taint was never removed, so the
+   worker was `NoSchedule` and k3s-agent crash-looped every 15 min.
 
 **Re-measured 2026-09-17 after the Kubernetes/Istio/k3s upgrade** (Kind node image
 1.35.0 -> 1.37.0, k3s v1.31.4+k3s1 -> v1.37.0+k3s1, cluster2 fully rebuilt): both nodes
