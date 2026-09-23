@@ -155,6 +155,16 @@ two one-line config fixes, neither of them an image change (50.0s -> 34.5s, -31%
    gateway. It must run on BOTH VMs, since routing one side leaves the reply ARPing. The
    legacy KThrees-generated paths (`target-cluster.yaml`, `-lite`) are not fixed. See
    `docs/sub-60s-cluster-strategy.md` §8-9.
+5. **Guest boot trims in the `:warm` image** (2026-09-23, 28.8s -> **25.0s** median of 7,
+   range 24.0-25.8; control plane alone ~21.4s). `bake-common.sh` step 4e: initrd-less boot
+   (`GRUB_FORCE_PARTUUID`; firmware+GRUB 1.73s -> 0.8s, kernel 3.2s -> 1.4s),
+   `modprobe.blacklist=ahci,libahci,psmouse`, btrfs-progs/mdadm removed, and
+   `LinkLocalAddressing=no` (wait-online was waiting ~1.3s for IPv6 DAD; now ~10ms).
+   **At the 25s line, not reliably under it.** The bake now pulls k3s from a host cache
+   (`scripts/fetch-k3s-artifacts.sh` + a mirror on `172.18.0.1:18080` during the bake), so
+   a clean rebake takes ~205s and no longer depends on GitHub. **Delete the
+   `ubuntu-noble-k3s-warm` DV before rebaking**, or the bake runs on top of the old disk.
+   See `docs/sub-60s-cluster-strategy.md` §10.
 
 **Re-measured 2026-09-17 after the Kubernetes/Istio/k3s upgrade** (Kind node image
 1.35.0 -> 1.37.0, k3s v1.31.4+k3s1 -> v1.37.0+k3s1, cluster2 fully rebuilt): both nodes

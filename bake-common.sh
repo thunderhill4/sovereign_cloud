@@ -66,6 +66,21 @@ WARM_TOKEN="${WARM_TOKEN:-f00dcafef00dcafef00dcafef00dcafe}"
 # warm cluster manifest.
 WARM_API_LB_IP="${WARM_API_LB_IP:-172.18.255.215}"
 
+# ── k3s artifact mirror ─────────────────────────────────────
+# The bake VM used to download the k3s binary and the airgap image tarball from
+# GitHub itself. On 2026-09-23 GitHub was degraded from this host and Step 1 alone
+# took ~19 min, past this script's 900s wait. Now the artifacts are fetched ONCE
+# into a host cache (scripts/fetch-k3s-artifacts.sh: resumable, retried,
+# checksum-verified) and served to the bake VM for the duration of the bake over
+# the Kind network gateway, which pods already reach (host Ollama uses it).
+# Measured: 81MB binary VM <- host in 0.03s. K3S_MIRROR=off restores the old
+# download-from-GitHub-in-the-VM behaviour; so does any failure to fetch or serve.
+K3S_MIRROR="${K3S_MIRROR:-on}"
+K3S_MIRROR_HOST="${K3S_MIRROR_HOST:-172.18.0.1}"
+K3S_MIRROR_PORT="${K3S_MIRROR_PORT:-18080}"
+K3S_CACHE_DIR="${K3S_CACHE_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.cache/k3s/${K3S_VERSION}}"
+K3S_MIRROR_URL=""   # set by start_k3s_mirror; empty = VM downloads from GitHub
+
 if [ "${BAKE_MODE}" = "warm" ]; then
   for f in server-ca.crt server-ca.key client-ca.crt client-ca.key \
            request-header-ca.crt request-header-ca.key \
@@ -123,6 +138,43 @@ emit_warm_ca_writefiles() {
   _wf "$d/service.key"           "$t/service.key"            0600
 }
 
+# start_k3s_mirror — fetch the k3s artifacts into the host cache (no-op when
+# already cached) and serve them to the bake VM until this script exits. Sets
+# K3S_MIRROR_URL on success; on any failure warns and leaves it empty so the
+# bake falls back to downloading from GitHub inside the VM.
+start_k3s_mirror() {
+  [ "${K3S_MIRROR}" = "on" ] || return 0
+  # The version actually installed is the literal inside the embedded bake.sh
+  # (see the K3S_VERSION note at the top of this file). Serving a cache for a
+  # different version would silently bake the wrong k3s, so refuse.
+  local baked
+  baked=$(sed -n 's/^ *K3S_VERSION="\(v[^"]*\)"$/\1/p' "${BASH_SOURCE[0]}" | tail -1)
+  if [ "${baked}" != "${K3S_VERSION}" ]; then
+    echo -e "    ${YELLOW}!${NC} K3S_VERSION=${K3S_VERSION} but bake.sh installs ${baked}; not using the mirror." >&2
+    return 0
+  fi
+  if ! K3S_CACHE_DIR="${K3S_CACHE_DIR}" \
+       "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts/fetch-k3s-artifacts.sh" "${K3S_VERSION}"; then
+    echo -e "    ${YELLOW}!${NC} Could not fetch k3s artifacts; the bake VM will download from GitHub." >&2
+    return 0
+  fi
+  python3 -m http.server --bind "${K3S_MIRROR_HOST}" "${K3S_MIRROR_PORT}" \
+    --directory "${K3S_CACHE_DIR}" >/dev/null 2>&1 &
+  local pid=$!
+  trap 'kill '"${pid}"' 2>/dev/null || true' EXIT
+  local i
+  for i in $(seq 1 20); do
+    if curl -fs -o /dev/null --max-time 2 "http://${K3S_MIRROR_HOST}:${K3S_MIRROR_PORT}/sha256sum-amd64.txt"; then
+      K3S_MIRROR_URL="http://${K3S_MIRROR_HOST}:${K3S_MIRROR_PORT}"
+      echo -e "    ${GREEN}✓${NC} Serving k3s ${K3S_VERSION} artifacts at ${K3S_MIRROR_URL} (pid ${pid})"
+      return 0
+    fi
+    sleep 0.5
+  done
+  echo -e "    ${YELLOW}!${NC} Mirror did not come up on ${K3S_MIRROR_HOST}:${K3S_MIRROR_PORT}; the bake VM will download from GitHub." >&2
+  kill "${pid}" 2>/dev/null || true
+}
+
 # emit_cloudinit — writes cloud-init userdata to stdout.
 # Prepends a `packages:` section from EXTRA_PACKAGES, emits the `write_files:`
 # header + (warm only) the bake-mode marker and fixed CA set, then the static
@@ -141,6 +193,11 @@ emit_cloudinit() {
   # bake.sh reads /etc/bake-mode to choose warm vs preinit first-boot behaviour.
   printf '  - path: /etc/bake-mode\n    content: %s\n    permissions: %s\n' \
     "${BAKE_MODE}" "'0644'"
+  # bake.sh reads /etc/bake-k3s-mirror; absent = download from GitHub.
+  if [ -n "${K3S_MIRROR_URL}" ]; then
+    printf '  - path: /etc/bake-k3s-mirror\n    content: %s\n    permissions: %s\n' \
+      "${K3S_MIRROR_URL}" "'0644'"
+  fi
   if [ "${BAKE_MODE}" = "warm" ]; then
     emit_warm_ca_writefiles
   fi
@@ -152,7 +209,12 @@ emit_cloudinit() {
 
       [Network]
       DHCP=yes
-      LinkLocalAddressing=ipv6
+      # IPv4-only cluster. With IPv6 link-local on, networkd keeps the link
+      # "configuring" until IPv6LL finishes DAD, and wait-online (which gates
+      # cloud-init's network stage) waited ~1.3s for it after DHCPv4 had already
+      # landed in 11ms. Measured: wait-online 1.3-1.9s -> 12ms.
+      LinkLocalAddressing=no
+      IPv6AcceptRA=no
 
       [DHCP]
       RouteMetric=100
@@ -166,17 +228,43 @@ emit_cloudinit() {
       BAKE_MODE="$(cat /etc/bake-mode 2>/dev/null || echo preinit)"
       echo "[bake] mode: ${BAKE_MODE}"
 
+      # Host-side mirror of the k3s release artifacts (see start_k3s_mirror in
+      # bake-common.sh); empty = download from GitHub as before.
+      K3S_MIRROR="$(cat /etc/bake-k3s-mirror 2>/dev/null || true)"
+      AIRGAP=/var/lib/rancher/k3s/agent/images/k3s-airgap-images-amd64.tar.zst
+      mkdir -p /var/lib/rancher/k3s/agent/images
+
       echo "[bake] Step 1: Installing k3s binary..."
-      curl -sfL https://get.k3s.io | \
-        INSTALL_K3S_VERSION="$K3S_VERSION" \
-        INSTALL_K3S_SKIP_START=true \
-        INSTALL_K3S_SKIP_ENABLE=true \
-        sh -
+      if [ -n "$K3S_MIRROR" ]; then
+        echo "[bake]   from host mirror $K3S_MIRROR"
+        curl -fsS --retry 5 "$K3S_MIRROR/sha256sum-amd64.txt" -o /tmp/k3s-sha256sum.txt
+        curl -fsS --retry 5 "$K3S_MIRROR/install.sh" -o /tmp/k3s-install.sh
+        curl -fsS --retry 5 "$K3S_MIRROR/k3s" -o /usr/local/bin/k3s
+        curl -fsS --retry 5 "$K3S_MIRROR/k3s-airgap-images-amd64.tar.zst" -o "$AIRGAP"
+        # Same checksums the host verified; catches a truncated transfer.
+        echo "$(awk '$2 == "k3s" {print $1}' /tmp/k3s-sha256sum.txt)  /usr/local/bin/k3s" | sha256sum -c -
+        echo "$(awk '$2 == "k3s-airgap-images-amd64.tar.zst" {print $1}' /tmp/k3s-sha256sum.txt)  $AIRGAP" | sha256sum -c -
+        chmod 0755 /usr/local/bin/k3s
+        INSTALL_K3S_SKIP_DOWNLOAD=true \
+          INSTALL_K3S_VERSION="$K3S_VERSION" \
+          INSTALL_K3S_SKIP_START=true \
+          INSTALL_K3S_SKIP_ENABLE=true \
+          sh /tmp/k3s-install.sh
+      else
+        curl -sfL https://get.k3s.io | \
+          INSTALL_K3S_VERSION="$K3S_VERSION" \
+          INSTALL_K3S_SKIP_START=true \
+          INSTALL_K3S_SKIP_ENABLE=true \
+          sh -
+      fi
 
       echo "[bake] Step 2: Downloading k3s airgap images..."
-      mkdir -p /var/lib/rancher/k3s/agent/images
-      curl -L "https://github.com/k3s-io/k3s/releases/download/${K3S_VERSION/+/%2B}/k3s-airgap-images-amd64.tar.zst" \
-        -o /var/lib/rancher/k3s/agent/images/k3s-airgap-images-amd64.tar.zst
+      if [ -n "$K3S_MIRROR" ]; then
+        echo "[bake]   already fetched from host mirror"
+      else
+        curl -L "https://github.com/k3s-io/k3s/releases/download/${K3S_VERSION/+/%2B}/k3s-airgap-images-amd64.tar.zst" \
+          -o "$AIRGAP"
+      fi
 
       echo "[bake] Step 3: Creating PRODUCTION k3s.service (no install script needed)..."
       # Create the FINAL k3s.service that reads config from /etc/rancher/k3s/
@@ -268,6 +356,41 @@ emit_cloudinit() {
         apt-daily.timer apt-daily-upgrade.timer \
         motd-news.service motd-news.timer \
         unattended-upgrades.service 2>/dev/null || true
+
+      # Boot-path trims, each measured in place on a live target VM (reboot, then
+      # systemd-analyze + console-log timestamps); see
+      # docs/sub-60s-cluster-strategy.md §10. Together: firmware+GRUB 1.73s ->
+      # 0.8s, kernel+initramfs 3.2s -> 1.4s, wait-online 1.4s -> 12ms.
+      echo "[bake] Step 4e: Boot-path trims..."
+      # Belt and braces with LinkLocalAddressing=no above: IPv4-only readiness.
+      # Named 99-* because netplan's generated 10-netplan.conf drop-in sorts after
+      # any 10-* name and would reset ExecStart back.
+      mkdir -p /etc/systemd/system/systemd-networkd-wait-online.service.d
+      cat > /etc/systemd/system/systemd-networkd-wait-online.service.d/99-ipv4-only.conf << 'WOEOF'
+      [Service]
+      ExecStart=
+      ExecStart=/usr/lib/systemd/systemd-networkd-wait-online --ipv4
+      WOEOF
+      # btrfs-progs/mdadm initramfs hooks load btrfs + raid456, whose raid6
+      # benchmark cost ~0.44s per boot. Root is ext4, no RAID.
+      DEBIAN_FRONTEND=noninteractive apt-get -y -qq remove btrfs-progs mdadm || true
+      # Only the modules this (KubeVirt virtio) hardware needs: initrd 30.7MB ->
+      # 17.5MB. It is now only the fallback, see GRUB_FORCE_PARTUUID below.
+      sed -i 's/^MODULES=.*/MODULES=dep/' /etc/initramfs-tools/initramfs.conf
+      update-initramfs -u
+      # GRUB_FORCE_PARTUUID: Ubuntu's initrd-less boot. GRUB boots root=PARTUUID
+      # with no initrd (virtio_blk/virtio_pci/ext4 are built in to the generic
+      # kernel) and falls back to the initrd if that boot fails. Skips the ~1.2s
+      # initramfs and the BIOS-speed load of the initrd itself. The PARTUUID is
+      # the bake disk's, which is the disk the containerDisk image is cut from.
+      # modprobe.blacklist: q35 AHCI with no disks (SATA link probing, ~0.31s)
+      # and the PS/2 mouse probe (~0.72s).
+      ROOT_PARTUUID="$(blkid -s PARTUUID -o value "$(findmnt -no SOURCE /)")"
+      cat > /etc/default/grub.d/99-kubeui-fastboot.cfg << GRUBEOF
+      GRUB_CMDLINE_LINUX_DEFAULT="\$GRUB_CMDLINE_LINUX_DEFAULT modprobe.blacklist=ahci,libahci,psmouse"
+      GRUB_FORCE_PARTUUID=${ROOT_PARTUUID}
+      GRUBEOF
+      update-grub
 
       if [ "${BAKE_MODE}" = "warm" ]; then
         echo "[bake] Step 5-warm: pre-writing config.yaml (fixed token + VIP SAN + disabled components)..."
@@ -505,6 +628,8 @@ emit_cloudinit() {
       chmod +x /usr/local/bin/k3s-fast-start.sh
 
       echo "[bake] Step 10: Resetting cloud-init and machine-id..."
+      # Bake-time only: the host mirror address means nothing on a real cluster.
+      rm -f /etc/bake-k3s-mirror /tmp/k3s-sha256sum.txt /tmp/k3s-install.sh
       cloud-init clean --logs
       truncate -s 0 /etc/machine-id
       rm -f /var/lib/dbus/machine-id /etc/ssh/ssh_host_*
@@ -557,6 +682,12 @@ if kubectl get dv "${DV_TARGET}" &>/dev/null; then
   echo -e "    ${YELLOW}!${NC} DataVolume '${DV_TARGET}' already exists (phase: ${PHASE})."
   if [ "${PHASE}" = "Succeeded" ]; then
     echo -e "    ${GREEN}✓${NC} Skipping clone — DV is already ready."
+    # The bake ends with `cloud-init clean`, so an already-BAKED DV looks like a
+    # fresh instance and bake.sh re-runs ON TOP of the previous bake instead of
+    # on the clean base image. Seen 2026-09-23: a "rebake" that finished in ~4
+    # min and was never built from ${DV_SOURCE}.
+    echo -e "    ${YELLOW}!${NC} If ${DV_TARGET} holds a PREVIOUS bake, this bakes on top of it,"
+    echo -e "      not on ${DV_SOURCE}. For a clean rebake: kubectl delete dv ${DV_TARGET}"
   elif [ "${PHASE}" = "WaitForFirstConsumer" ]; then
     echo -e "    ${YELLOW}!${NC} DV is waiting for first consumer — VM creation in Step 2 will unblock it."
   else
@@ -627,6 +758,8 @@ if kubectl get vm "${VM_NAME}" &>/dev/null; then
   echo -e "    ${YELLOW}!${NC} VM '${VM_NAME}' already exists — skipping creation."
   echo -e "    ${DIM:-}    (already baking or finished; waiting for VMI in step 3)${NC}"
 else
+  info "Preparing k3s artifact mirror..."
+  start_k3s_mirror
   info "Creating cloud-init Secret..."
   kubectl delete secret bake-cloudinit --ignore-not-found 2>/dev/null
   emit_cloudinit | kubectl create secret generic bake-cloudinit --from-file=userdata=/dev/stdin

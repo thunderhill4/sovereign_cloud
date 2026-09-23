@@ -535,3 +535,75 @@ CP VM. Port it to their `preK3sCommands` if those paths are kept.
 A VM restart is fine — a containerDisk VM re-runs cloud-init from scratch. Baking the
 script into the image as a networkd-dispatcher hook (lever 3's rebake) would make it
 durable.
+
+---
+
+## 10. Guest boot path (lever 3, 2026-09-23) — ~4s off every VM start
+
+Method: edit a live target VM, `systemctl reboot` it (a KubeVirt guest reboot keeps the
+ephemeral disk), then read `systemd-analyze` plus the console log's own timestamps
+(`reboot: Restarting system` -> first kernel line = SeaBIOS + GRUB + kernel/initrd load).
+Two reboots per step. Per-VM-start savings, worker VM:
+
+| change | phase | before | after |
+|---|---|---|---|
+| smaller initrd (`MODULES=dep`, 30.7MB -> 17.5MB) | firmware + GRUB | 1.73s | 1.09-1.34s |
+| initrd-less boot (`GRUB_FORCE_PARTUUID`) | firmware + GRUB | | **0.78-0.83s** |
+| `modprobe.blacklist=ahci,libahci,psmouse`, drop btrfs-progs/mdadm hooks | kernel + initramfs | 3.14-3.26s | 2.79-2.82s |
+| + initrd-less boot | kernel | | **1.32-1.53s** |
+| `LinkLocalAddressing=no` on enp1s0 (+ wait-online `--ipv4`) | wait-online | 1.31-1.89s | **11-12ms** |
+
+Findings along the way:
+- **wait-online was waiting for IPv6**, not DHCP: DHCPv4 landed 11ms after it started,
+  and it finished at "Gained IPv6LL" ~1.3s later. `--ipv4` alone did NOT fix it:
+  networkd keeps the link `configuring` until IPv6LL finishes, so it has to be switched
+  off in the `.network` file (which the bake writes: `LinkLocalAddressing=ipv6` -> `no`).
+- **A wait-online drop-in named `10-*` is silently overridden** by netplan's generated
+  `/run/.../10-netplan.conf` (drop-ins apply in filename order). Use `99-*`.
+- The kernel probe gaps were the q35 AHCI controller with no disks (0.31s), the PS/2 mouse
+  probe (0.72s) and the raid6 benchmark from the btrfs/mdadm initramfs hooks (0.44s).
+- `virtio_blk`, `virtio_pci` and `ext4` are built into Ubuntu's generic kernel, so
+  Ubuntu's initrd-less boot (`GRUB_FORCE_PARTUUID`; GRUB falls back to the initrd if the
+  boot fails, which is why `panic=-1` appears on the cmdline) works on these VMs.
+
+Baked into `bake-common.sh` (step 4e + the `10-enp1s0.network` change). Side effect:
+removing `btrfs-progs` also removes the `ubuntu-server` metapackage (a metapackage only; it
+uninstalls nothing else).
+
+**End to end** (patched CAPK, worker readyz gate, VM routes; `time-to-ready-by-name.sh`):
+
+| image | both nodes Ready (s) | median | CP Ready median |
+|---|---|---|---|
+| before lever 3 | 30.0 / 28.8 / 28.7 | 28.8 | 25.1 |
+| lever 3, GitHub-downloaded bake | 24.0 / 25.0 / 24.8 | 24.8 | 21.6 |
+| lever 3, mirror bake | 25.1 / 25.7 / 24.8 | 25.1 | 21.4 |
+| lever 3, final (marker removed) | 25.8 | — | 21.0 |
+
+Same build three ways, so the spread is noise: **median of all 7 samples 25.0s** (-3.8s). That
+sits *on* the 25s line, not reliably under it (3 of 7 runs above 25.0s). Verified on the final
+image: initrd-less boot, blacklist applied, wait-online 4-9ms, no IPv6, VM routes, no failed
+units, cross-node DNS/ping, `kubectl top` on both nodes, `make verify` passes.
+
+### The bake no longer downloads from GitHub
+
+GitHub was degraded from this host on 2026-09-23 (every connect ~15s, as low as 11B/s), and
+the bake VM's k3s download (Step 1) took ~19 min — past the script's 900s wait, so the script
+gave up while the VM carried on. Fix: `scripts/fetch-k3s-artifacts.sh` fetches the k3s binary,
+airgap tarball, checksum file and install script ONCE into `.cache/k3s/<version>/`
+(gitignored; resumable, retried, checksum-verified, no-op when complete).
+`bake-common.sh`'s `start_k3s_mirror` runs it, serves the cache over the Kind network gateway
+(`http://172.18.0.1:18080`) for the life of the bake, and passes the URL to the VM through a
+`write_files` marker; `bake.sh` downloads from it and re-checks the checksums. Falls back to
+GitHub on any failure; `K3S_MIRROR=off` forces the old path. The mirror is refused if the host
+`K3S_VERSION` differs from the literal `bake.sh` installs. The marker is removed in Step 10.
+
+Measured: VM <- host, 81MB binary in 0.03s. **Full clean pipeline (fresh clone, bake,
+package, pre-pull): 206s and 205s**, vs ~19 min for Step 1 alone before.
+
+**Rebake trap:** with the `ubuntu-noble-k3s-warm` DV still present, a rebake **bakes on top
+of the previous bake** (the bake ends with `cloud-init clean`, so the old disk re-runs
+`bake.sh`) instead of cloning the clean base. Seen once today — a 4-minute "rebake" whose
+image was discarded. The script now warns; delete the DV for a clean rebake.
+
+Rollback tags in the local registry: `ubuntu-noble-k3s:warm-pre-lever3` (Sept 16) and
+`:warm-lever3-gh` (lever 3, GitHub-downloaded bake).
