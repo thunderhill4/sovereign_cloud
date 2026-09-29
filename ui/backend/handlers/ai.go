@@ -233,6 +233,14 @@ func HandleAIChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Pre-model guard: refuse destructive / injection prompts before any agent
+	// (and therefore any AgentRun) sees them. See guard.go.
+	if refusal := guardMessage(r.Context(), agentName, lastUserMessage(msgs)); refusal != "" {
+		emitEnvelope(w, flusher, Envelope{Type: "error", Error: refusal})
+		emitDone(w, flusher)
+		return
+	}
+
 	body, err := json.Marshal(oaiChatRequest{Model: "default", Stream: true, Messages: msgs})
 	if err != nil {
 		log.Printf("AI: marshal error: %v", err)

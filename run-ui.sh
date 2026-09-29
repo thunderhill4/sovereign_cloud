@@ -27,6 +27,19 @@ fi
 
 SECURITY_AGENT_URL="${SECURITY_AGENT_URL:-http://localhost:8082}"
 
+# Pre-model guard (ui/backend/handlers/guard.go). Opt-in: RUN_LAYA_GUARD=1 starts
+# laya-serve from LAYA_ENV on loopback and points the backend at it. Or set
+# LAYA_URL yourself to use an already-running laya-serve. Unset = guard off.
+LAYA_ENV="${LAYA_ENV:-$HOME/laya-env}"
+LAYA_PORT="${LAYA_PORT:-8095}"
+LAYA_BLOCK_THRESHOLD="${LAYA_BLOCK_THRESHOLD:-0.6}"
+if [[ "${RUN_LAYA_GUARD:-}" == "1" ]]; then
+    LAYA_URL="${LAYA_URL:-http://127.0.0.1:${LAYA_PORT}}"
+    LAYA_API_KEY="${LAYA_API_KEY:-$(head -c 24 /dev/urandom | base64 | tr -d '/+=')}"
+fi
+LAYA_URL="${LAYA_URL:-}"
+LAYA_API_KEY="${LAYA_API_KEY:-}"
+
 # Local container registry.
 #
 # REGISTRY_ALIAS is the fixed name image references use (and what the UI shows).
@@ -70,11 +83,19 @@ export POOL_POLL_SECONDS="${POOL_POLL_SECONDS:-5}"
 
 cleanup() {
     echo "Shutting down..."
-    kill $BACKEND_PID $FRONTEND_PID ${SECURITY_PID:-} 2>/dev/null
-    wait $BACKEND_PID $FRONTEND_PID ${SECURITY_PID:-} 2>/dev/null
+    kill $BACKEND_PID $FRONTEND_PID ${SECURITY_PID:-} ${LAYA_PID:-} 2>/dev/null
+    wait $BACKEND_PID $FRONTEND_PID ${SECURITY_PID:-} ${LAYA_PID:-} 2>/dev/null
     echo "Done."
 }
 trap cleanup EXIT INT TERM
+
+if [[ "${RUN_LAYA_GUARD:-}" == "1" ]]; then
+    echo "Starting laya-serve (pre-model guard) on 127.0.0.1:${LAYA_PORT}..."
+    HF_HUB_OFFLINE=1 LAYA_HOST=127.0.0.1 LAYA_PORT="$LAYA_PORT" LAYA_MODELS=english \
+    LAYA_API_KEY="$LAYA_API_KEY" LAYA_LOG_LEVEL=warning \
+    "$LAYA_ENV/bin/laya-serve" &
+    LAYA_PID=$!
+fi
 
 echo "Starting backend on :8080..."
 cd "$UI_DIR/backend"
@@ -86,6 +107,9 @@ SYMPOZIUM_AGENT_URL_MESH_SRE_AGENT="$SYMPOZIUM_AGENT_URL_MESH_SRE_AGENT" \
 SYMPOZIUM_API_TOKEN="$SYMPOZIUM_API_TOKEN" \
 SYMPOZIUM_DASHBOARD_URL="$SYMPOZIUM_DASHBOARD_URL" \
 SECURITY_AGENT_URL="$SECURITY_AGENT_URL" \
+LAYA_URL="$LAYA_URL" \
+LAYA_API_KEY="$LAYA_API_KEY" \
+LAYA_BLOCK_THRESHOLD="$LAYA_BLOCK_THRESHOLD" \
 CLAUDE_DIR="$SCRIPT_DIR" \
 go run . &
 BACKEND_PID=$!
@@ -116,6 +140,7 @@ echo "  Sympozium default:     ${SYMPOZIUM_AGENT_URL}  (${SYMPOZIUM_DEFAULT_AGEN
 echo "  Sympozium target:      ${SYMPOZIUM_AGENT_URL_TARGET_CLUSTER_AGENT}  (target-cluster-agent)"
 echo "  Sympozium mesh SRE:    ${SYMPOZIUM_AGENT_URL_MESH_SRE_AGENT}  (mesh-sre-agent)"
 echo "  Security agent:        ${SECURITY_AGENT_URL}"
+echo "  Pre-model guard:       ${LAYA_URL:-off}  (threshold ${LAYA_BLOCK_THRESHOLD})"
 echo ""
 echo "Press Ctrl+C to stop."
 

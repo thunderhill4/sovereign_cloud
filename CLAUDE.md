@@ -310,6 +310,7 @@ The backend proxies AI chat to Sympozium agents via their OpenAI-compatible serv
 - Agent list: backend queries the Kubernetes API for `SympoziumInstance` CRs in `$SYMPOZIUM_NAMESPACE` (serving-enabled only) via the dynamic client
 - Timeout: 120 seconds per request
 - SSE buffer: 256KB scanner buffer for large lines
+- Pre-model guard (`handlers/guard.go`): when `LAYA_URL` is set, the newest user message is first scored by a local Laya classifier (`laya-serve`, `POST /v1/systemone`, english checkpoint) on two yes/no questions: destructive request, and instruction override / secret / privilege request. If either score is ≥ `LAYA_BLOCK_THRESHOLD` (default 0.6), the chat gets an `error` envelope and the agent is never called, so no AgentRun is created. It fails open (logged) when Laya is unset or unreachable. Every verdict is logged. The question wording is what was measured (30 labelled prompts: recall 0.93, FPR 0.00 at 0.6), so re-measure before editing it. This is a mitigation, not a boundary; it doesn't replace toolGating or per-run RBAC.
 
 **Env vars for `run-ui.sh`:**
 ```
@@ -321,6 +322,10 @@ SYMPOZIUM_AGENT_URL_MESH_SRE_AGENT=http://172.18.255.222:8080/
 SYMPOZIUM_API_TOKEN=<token from sympozium-ui-token Secret>
 SYMPOZIUM_DASHBOARD_URL=http://172.18.255.212:8080   # console-proxy upstream (server-side; in prod the in-cluster svc DNS)
 CLAUDE_DIR=<repo root>
+RUN_LAYA_GUARD=1                  # optional: start laya-serve on 127.0.0.1:$LAYA_PORT (8095) from $LAYA_ENV (~/laya-env)
+LAYA_URL=                         # or point at an existing laya-serve; unset = guard off
+LAYA_API_KEY=                     # generated per run when RUN_LAYA_GUARD=1
+LAYA_BLOCK_THRESHOLD=0.6
 ```
 
 ### `mesh-sre-agent` — Istio ambient mesh observability
