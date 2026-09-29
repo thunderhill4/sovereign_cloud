@@ -9,6 +9,15 @@ echo "    Control Plane:  k3s"
 # Enable experimental features for ClusterResourceSet
 export EXP_CLUSTER_RESOURCE_SET=true
 
+# CAPI v1.13+ enables ReconcilerRateLimiting by default (beta): at most one
+# reconcile per object per second. Building a cluster re-reconciles the same
+# Cluster/Machine several times in quick succession (ownerRefs, infra ready,
+# bootstrap ready), so each hop waited out the limit — capi-controller-manager
+# acted ~2s after every new object. It protects management clusters with many
+# workload clusters; this one runs a single target cluster.
+# docs/sub-60s-cluster-strategy.md §11.
+export EXP_RECONCILER_RATE_LIMITING=false
+
 clusterctl init \
   --infrastructure kubevirt \
   --bootstrap k3s \

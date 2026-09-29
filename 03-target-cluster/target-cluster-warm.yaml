@@ -137,7 +137,9 @@ spec:
       # start until that expires. Advertising the VIP, which every VM already
       # reaches, makes the first dial succeed: median time-to-ready 50.0s -> 42.7s,
       # run-to-run spread 6.1s -> 1.6s. Must run after KThrees writes config.yaml.
-      - "echo 'advertise-address: 172.18.255.215' >> /etc/rancher/k3s/config.yaml"
+      # Idempotent: the warm image's k3s-early.service may already have added it
+      # (and a duplicate key breaks the next k3s start).
+      - "grep -q '^advertise-address:' /etc/rancher/k3s/config.yaml || echo 'advertise-address: 172.18.255.215' >> /etc/rancher/k3s/config.yaml"
     # NOTE: ordering matters. By the time postK3sCommands run, install.sh has
     # already started k3s, whose ExecStartPre created the .firstboot-done
     # sentinel — so the sentinel-guarded start line below hits `exit 0` and

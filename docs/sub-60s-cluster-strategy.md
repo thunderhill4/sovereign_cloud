@@ -607,3 +607,77 @@ image was discarded. The script now warns; delete the DV for a clean rebake.
 
 Rollback tags in the local registry: `ubuntu-noble-k3s:warm-pre-lever3` (Sept 16) and
 `:warm-lever3-gh` (lever 3, GitHub-downloaded bake).
+
+---
+
+## 11. Under 20 seconds (2026-09-30) — a CAPI rate limiter, an early k3s start, and a skewed instrument
+
+**Result: 24.4s -> 18.1s median, both nodes Ready** (`time-to-ready-by-name.sh --runs 5`,
+clean teardown, same session). Every run under 20s (17.7-18.3).
+
+| configuration | control plane Ready (s) | both nodes Ready (s) | median |
+|---|---|---|---|
+| baseline (`:warm-b0`, CAPI rate limiting on) | 21.1 / 20.6 / 20.5 / 20.7 / 20.7 | 25.6 / 24.2 / 24.4 / 24.8 / 24.2 | **24.4** |
+| + early k3s start (`:warm-b1`) | 19.7 / 20.1 / 19.5 / 20.1 / 20.5 | 24.2 / 23.8 / 23.4 / 23.9 / 24.1 | **23.9** |
+| + `ReconcilerRateLimiting=false` | 14.4 / 13.6 / 14.1 / 14.5 / 14.3 | 18.1 / 17.7 / 18.3 / 18.1 / 18.1 | **18.1** |
+
+### The instrument was skewed — fixed first
+
+`time-to-ready-by-name.sh` applied the next cluster as soon as `kubectl delete cluster`
+returned, while the previous run's virt-launcher pods were still terminating and holding
+8Gi + 6Gi. The new control-plane pod then sat in `FailedScheduling: Insufficient memory` for
+up to 12s. **Every run on 2026-09-30 before the fix was affected**, including the baseline
+(events at 20:36-20:39); the 6-7s CAPI chain only partly hid it. It surfaced when the chain
+shrank to 1s: that configuration first measured *28.5s* (worse), while `phase-timings.sh`,
+which already waits for VMs to be gone, measured 17.6s for the same build. The script now
+waits for the cluster's VMs, VMIs and launcher pods to be gone before applying (7-12s per
+run, outside the clock). A real deploy onto a clean node never pays this; the warm pool's
+rebuild-after-delete might, and is worth checking.
+
+### Lever 1 — CAPI `ReconcilerRateLimiting` (-5.8s)
+
+Per-hop controller logs showed `capi-controller-manager` acting ~2.0s after every new object
+it owns (Cluster/MachineDeployment -> MachineSet 2.6s, MachineSet -> Machine 2.0s, CP Machine
+-> first reconcile 2.0s), while CAPK and the k3s providers reacted within 10-60ms of an event.
+Cause: CAPI v1.14's `ReconcilerRateLimiting` feature gate (beta since v1.13, **on by
+default**) limits every reconciler to one reconcile per object per second
+(`util/controller/controller.go`); a build re-reconciles the same Cluster and Machines
+several times in quick succession. Off, the whole chain — apply to both VMs created — takes
+~1s instead of 6-7s. Set in `02-capi-init/init-management-cluster.sh`
+(`EXP_RECONCILER_RATE_LIMITING=false`). **Cluster state, not manifest state:** a running
+cluster2 needs the `capi-controller-manager` Deployment's `--feature-gates` arg patched
+(done live today) or `make capi-init` re-run. The gate exists to protect management clusters
+with many workload clusters; this one runs one at a time.
+
+### Lever 2 — start k3s at `basic.target` (-0.5s)
+
+The CP started k3s from KThrees' `runcmd` in cloud-init's **final** stage. On this image
+cloud-init's network stage (which runs `write_files`) is ordered `Before=sysinit.target`, so
+by `basic.target` every CA and `config.yaml` is already on disk (measured: network stage done
+4.51s, `basic.target` 4.56s, k3s started 5.61s). `bake-common.sh` Step 6d (warm only) adds
+`k3s-early.service` (`After=basic.target cloud-init.service`): it makes the same edits as the
+manifest's `preK3sCommands` (VM routes, drop `cluster-init`, remove `etcd-proxy.yaml`,
+`advertise-address` from the first `tls-san`) and starts k3s. It does nothing on a worker
+(`server:` in config.yaml) or when the CA was not written this boot. The manifests'
+`advertise-address` append is now idempotent — a duplicate key would break the next k3s start.
+Measured on a live CP: k3s start moved from 1.05s to 0.17s after `basic.target`; end to end
+-0.5s (not the full 0.9s: the worker still joins on its own timeline).
+
+Rejected on the way: a bolder variant starting k3s *before* cloud-init with a baked copy of
+the config (~0.85s more) would have to skip `sysinit.target`, where `br_netfilter`/`overlay`
+and the k3s sysctls load.
+
+### Where the 18.1s goes now (one clean run, from apply)
+
+```
+apply -> both VMs created          ~1s    (was 6-7s)
+CP: launcher -> qemu running        3s
+CP: kernel -> systemd -> k3s start  ~6s    (k3s now starts at basic.target)
+CP: k3s start -> Ready              ~3.5s
+worker: gate open -> Ready          ~3.5-4s
+```
+
+What is left, by size: k3s server startup (~3.3-4s), the worker join after the CP API is up
+(~3.5-4s), and systemd before cloud-init (~2s).
+
+Rollback tags: `ubuntu-noble-k3s:warm-b0` (image before Step 6d), `:warm-b1` (= current `:warm`).

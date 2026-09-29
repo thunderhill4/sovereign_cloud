@@ -536,6 +536,54 @@ emit_cloudinit() {
       systemctl disable k3s 2>/dev/null || true
       systemctl disable k3s-agent 2>/dev/null || true
 
+      if [ "${BAKE_MODE}" = "warm" ]; then
+      # Start k3s on the control plane as soon as cloud-init has written its
+      # files, instead of from runcmd in cloud-init's final stage. cloud-init's
+      # network stage (which runs write_files) is ordered Before=sysinit.target,
+      # so by basic.target every CA and config.yaml is on disk. Measured on a CP
+      # VM: basic.target 4.56s, k3s started from runcmd at 5.61s. The manifest's
+      # preK3sCommands still run later; the edits here mirror them and are
+      # idempotent. A worker (config.yaml has `server:`) or a VM whose CA was not
+      # written this boot is left to the normal cloud-init path.
+      # docs/sub-60s-cluster-strategy.md §11.
+      echo "[bake] Step 6d: Installing k3s-early.service (start k3s at basic.target)..."
+      cat > /usr/local/sbin/k3s-early-start.sh << 'EARLY_EOF'
+      #!/bin/bash
+      set -u
+      CFG=/etc/rancher/k3s/config.yaml
+      CA=/var/lib/rancher/k3s/server/tls/server-ca.crt
+      log() { echo "[k3s-early] $*"; }
+      BTIME=$(awk '/^btime/{print $2}' /proc/stat)
+      [ -f "$CFG" ] && [ -f "$CA" ] || { log "no config/CA; leaving start to cloud-init"; exit 0; }
+      [ "$(stat -c %Y "$CA")" -ge "$BTIME" ] || { log "CA not written this boot; leaving start to cloud-init"; exit 0; }
+      grep -q '^server:' "$CFG" && { log "agent config; leaving start to cloud-init"; exit 0; }
+      [ -x /usr/local/sbin/pod-subnet-via-gateway.sh ] && /usr/local/sbin/pod-subnet-via-gateway.sh || true
+      sed -i '/cluster-init/d' "$CFG"
+      rm -f /var/lib/rancher/k3s/server/manifests/etcd-proxy.yaml
+      VIP=$(awk '/^tls-san:/{f=1; next} f && /^- /{print $2; exit} f && !/^[- ]/{exit}' "$CFG")
+      if [ -n "$VIP" ] && ! grep -q '^advertise-address:' "$CFG"; then
+        echo "advertise-address: $VIP" >> "$CFG"
+      fi
+      log "starting k3s (advertise-address ${VIP:-unset})"
+      systemctl start --no-block k3s
+      EARLY_EOF
+      chmod 0755 /usr/local/sbin/k3s-early-start.sh
+      cat > /etc/systemd/system/k3s-early.service << 'EARLYUNIT_EOF'
+      [Unit]
+      Description=Start k3s once cloud-init has written its config
+      After=basic.target cloud-init.service
+      ConditionPathExists=/var/lib/rancher/k3s/server/tls/server-ca.crt
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/k3s-early-start.sh
+
+      [Install]
+      WantedBy=multi-user.target
+      EARLYUNIT_EOF
+      systemctl enable k3s-early.service
+      fi
+
       echo "[bake] Preserved state summary:"
       ls -la /var/lib/rancher/k3s/server/ 2>/dev/null || true
       du -sh /var/lib/rancher/k3s/server/db/ 2>/dev/null | sed 's/^/  etcd: /' || echo "  (no etcd db)"

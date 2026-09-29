@@ -122,7 +122,9 @@ spec:
       # does not start until that expires (measured 10.019s / 10.017s / 10.000s
       # across runs). Advertising the VIP, which every VM already reaches, makes
       # that first dial succeed. Must run after KThrees writes config.yaml.
-      - "echo 'advertise-address: {{API_LB_IP}}' >> /etc/rancher/k3s/config.yaml"
+      # Idempotent: the warm image's k3s-early.service may already have added it
+      # (and a duplicate key breaks the next k3s start).
+      - "grep -q '^advertise-address:' /etc/rancher/k3s/config.yaml || echo 'advertise-address: {{API_LB_IP}}' >> /etc/rancher/k3s/config.yaml"
     postK3sCommands:
       # Reap the bake VM's leftover Node object (carried in the warm SQLite state)
       # once the API is up. Must come first — see target-cluster-warm.yaml note.

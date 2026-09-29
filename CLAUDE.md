@@ -98,7 +98,7 @@ make ui                 # launch web UI dev servers
 ### Cluster Lifecycle
 
 ```bash
-make target-cluster            # DEFAULT — WARM fast-path (parallel boot, ~33.7s both nodes measured)
+make target-cluster            # DEFAULT — WARM fast-path (parallel boot, 18.1s both nodes measured 2026-09-30)
 make target-cluster-warm       # same warm fast-path, explicit
 make target-cluster-lite       # legacy lite, 2 CPU / 4Gi (sequential, :latest)
 make target-cluster-full       # legacy full, 4 CPU / 8Gi (sequential, :latest)
@@ -165,6 +165,15 @@ two one-line config fixes, neither of them an image change (50.0s -> 34.5s, -31%
    a clean rebake takes ~205s and no longer depends on GitHub. **Delete the
    `ubuntu-noble-k3s-warm` DV before rebaking**, or the bake runs on top of the old disk.
    See `docs/sub-60s-cluster-strategy.md` §10.
+
+**2026-09-30: under 20s — median 18.1s both nodes** (17.7-18.3, control plane 14.3s), from
+24.4s the same session: CAPI `ReconcilerRateLimiting=false` (-5.8s; one reconcile per object
+per second was adding ~2s to every CAPI hop; set in `init-management-cluster.sh`, and
+**cluster state** — patch `capi-controller-manager`'s `--feature-gates` or re-run `make capi-init`
+after any cluster2 rebuild) and `k3s-early.service` baked into `:warm` (-0.5s; starts k3s at
+`basic.target`). `time-to-ready-by-name.sh` now waits for the previous run's launcher pods to be
+gone — before that, every run paid up to 12s of `Insufficient memory` scheduling. Details:
+`docs/sub-60s-cluster-strategy.md` §11.
 
 **Re-measured 2026-09-17 after the Kubernetes/Istio/k3s upgrade** (Kind node image
 1.35.0 -> 1.37.0, k3s v1.31.4+k3s1 -> v1.37.0+k3s1, cluster2 fully rebuilt): both nodes
