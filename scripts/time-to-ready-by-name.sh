@@ -65,6 +65,20 @@ run_once() {
 
   echo "==> Tearing down any existing $CLUSTER_NAME"
   kubectl delete cluster "$CLUSTER_NAME" --ignore-not-found --timeout=180s >/dev/null 2>&1 || true
+  # Wait until the previous run's VMs and their launcher pods are really gone.
+  # `delete cluster` returns once the Cluster object is gone, while the old
+  # virt-launcher pods are still terminating and holding 8Gi + 6Gi. The next
+  # control-plane pod then sits in FailedScheduling "Insufficient memory" for up
+  # to 12s (found 2026-09-30; every run that day was affected, the slow CAPI
+  # chain only partly hid it). A real deploy onto a clean node never waits on
+  # this, so it must not be in the number.
+  local w=0
+  while [ "$w" -lt 180 ]; do
+    [ -z "$(kubectl get vmi,vm -o name 2>/dev/null | grep "$CLUSTER_NAME" || true)" ] &&
+    [ -z "$(kubectl get pods -o name 2>/dev/null | grep "virt-launcher-$CLUSTER_NAME" || true)" ] && break
+    sleep 1; w=$((w+1))
+  done
+  echo "    previous VMs and launcher pods gone after ${w}s"
 
   if [[ "$MANIFEST" == *target-cluster-warm* ]]; then
     echo "==> Seeding warm CA/token secrets"
