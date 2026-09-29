@@ -12,6 +12,8 @@ SYMPOZIUM_NS="${SYMPOZIUM_NAMESPACE:-sympozium-system}"
 CERT_MANAGER_VERSION="${CERT_MANAGER_VERSION:-v1.16.2}"
 # Pinned to the version these manifests/labs are verified against.
 # Upgraded 0.10.38 -> 0.10.47 (2026-08-21) -> 0.10.57 (2026-09-09) -> 0.10.75
+# (2026-09-16) -> 0.10.87 (2026-09-30; see the 0.10.75 -> 0.10.87 note below).
+# Earlier history:
 # (2026-09-16, latest published at time of upgrade). The 0.10.38 pin's
 # original rationale (newer charts dropped the SympoziumInstance CRD) no
 # longer applies: the SympoziumInstance objects were removed from
@@ -61,6 +63,20 @@ CERT_MANAGER_VERSION="${CERT_MANAGER_VERSION:-v1.16.2}"
 # sympozium-lb-setup.sh (the AgentRun controller recreates Services as
 # ClusterIP when it regenerates the serving Deployments).
 #
+# 0.10.75 -> 0.10.87: CRDs server-side, then helm upgrade without --wait. Values
+# diff is additive only (Celln mediation/fleet settings, all off by default);
+# nothing in values.yaml changed. Two breakages, both in the post-upgrade step,
+# both now handled by fix-web-proxy-image.sh:
+#   1. Recreated serving Deployments come back with readOnlyRootFilesystem:
+#      true, so every web-proxy crash-loops (exit 2, no logs). mesh-sre-agent
+#      was never in any fix-web-proxy-rootfs.sh caller list and had been
+#      crash-looping since 0.10.75 for this reason.
+#   2. cluster2-agent's recreated serving AgentRun raced its Deployment and
+#      went Failed ("server Deployment not found") with no retry; deleting it
+#      once more fixes it.
+# Verified: istio-adv-verify 22/22, all three agents Serving with 0 restarts,
+# live chat completions with real kubectl tool calls through all three.
+#
 # 0.10.57 -> 0.10.75: clean helm upgrade (SA already Helm-adopted from the
 # last upgrade; no new collisions). CRDs/RBAC diff against 0.10.57 is
 # additive only (new Celln-fleet + model-gateway CRDs, both `enabled: false`
@@ -85,7 +101,7 @@ CERT_MANAGER_VERSION="${CERT_MANAGER_VERSION:-v1.16.2}"
 # answer matched real cluster state. Re-run this same check after any future
 # upgrade -- the per-run identity model is new enough here that it could
 # change again.
-SYMPOZIUM_CHART_VERSION="${SYMPOZIUM_CHART_VERSION:-0.10.75}"
+SYMPOZIUM_CHART_VERSION="${SYMPOZIUM_CHART_VERSION:-0.10.87}"
 
 # LLM credentials. For Ollama-compatible endpoints that don't require auth,
 # any non-empty value works. Override LLM_API_KEY if using OpenAI/Anthropic.

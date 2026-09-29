@@ -464,7 +464,10 @@ The UI is deployed to the `kubeui` namespace on cluster2 (`ui/k8s/kubeui.yaml`):
   **No Istio release supports Kubernetes 1.37 yet** (checked 1.31.0's own announcement
   — tested range is still 1.32-1.36) so this combination is running deliberately
   unsupported; it happened to pass every check here, but re-verify before trusting
-  that a future patch bump keeps it that way. Findings from the rebuild:
+  that a future patch bump keeps it that way. **2026-09-30:** Istio 1.31.0 → 1.31.1
+  and Sympozium 0.10.75 → 0.10.87 in place (Kubernetes stays 1.37.0: no
+  `kindest/node` or k3s build of 1.37.1 exists yet). Upgrade notes are in the
+  `install-sympozium.sh` header. Findings from the rebuild:
   1. **`bake-common.sh`'s documented `K3S_VERSION` override never controlled the
      bake.** The version that actually reaches the VM is a second, independent
      hardcoded literal inside the embedded `/usr/local/bin/bake.sh` cloud-init

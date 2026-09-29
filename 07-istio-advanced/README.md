@@ -28,17 +28,21 @@ Istio 1.28 is also outside its tested Kubernetes range on these 1.35 clusters;
 compatible. Re-check istio.io's release announcement for the current tested
 range before assuming a future Istio bump clears this.
 
+**Updated 2026-09-30**: patched in place to 1.31.1 (re-running `make istio-adv-install`
+reuses the existing `cacerts`, so the shared root survives). Support range unchanged
+(1.32–1.36), so still unsupported on 1.37. `verify.sh` 22/22 before and after.
+
 ## Prerequisites
 
 `kubectl`, `helm`, `docker`, `openssl`, and the `kind-cluster1` / `kind-cluster2`
 contexts. `istioctl` is downloaded automatically if the one in `PATH` is not the
-pinned `ISTIO_VERSION` (default 1.31.0).
+pinned `ISTIO_VERSION` (default 1.31.1).
 
 ## Running it
 
 ```bash
 make istio-adv-prereqs    # MetalLB on cluster1, Gateway API CRDs, cert-manager
-make istio-adv-install    # shared root CA + Istio 1.31.0 on both clusters
+make istio-adv-install    # shared root CA + Istio 1.31.1 on both clusters
 make istio-adv-act1       # north-south Gateway
 make istio-adv-act2       # waypoints
 make istio-adv-act3       # multicluster

@@ -64,15 +64,44 @@ fi
 
 # Regenerate the serving Deployments from the updated SkillPack.
 echo "==> Recreating serving AgentRuns so the controller applies the new image"
-for run in $($K get agentruns -n "$NS" -o name 2>/dev/null | grep -E 'web-endpoint$' || true); do
-    echo "    deleting ${run}"
-    $K delete "$run" -n "$NS" --ignore-not-found >/dev/null
+RUNS=$($K get agentruns -n "$NS" -o name 2>/dev/null | grep -E 'web-endpoint$' | sed 's|.*/||' || true)
+for run in $RUNS; do
+    echo "    deleting agentrun/${run}"
+    $K delete agentrun "$run" -n "$NS" --ignore-not-found >/dev/null
 done
 
-echo "==> Waiting for serving Deployments to come back…"
-sleep 5
-for d in $($K get deploy -n "$NS" -o name 2>/dev/null | grep -E 'web-endpoint-server$' || true); do
-    $K rollout status "$d" -n "$NS" --timeout=180s || echo "    WARNING: $d not ready"
+# The recreated run can race its own Deployment: seen on 0.10.75 -> 0.10.87,
+# cluster2-agent's run went Failed ("server Deployment not found") one second
+# after creation and never retried. Delete such a run once more; the Agent
+# controller recreates it and the second attempt finds the Deployment.
+echo "==> Waiting for serving AgentRuns to reach Serving…"
+for run in $RUNS; do
+    retried=0
+    for _ in $(seq 1 60); do
+        phase="$($K get agentrun "$run" -n "$NS" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+        [[ "$phase" == "Serving" ]] && break
+        if [[ "$phase" == "Failed" && $retried -eq 0 ]]; then
+            echo "    ${run} Failed ($($K get agentrun "$run" -n "$NS" -o jsonpath='{.status.error}' 2>/dev/null)) — recreating once"
+            $K delete agentrun "$run" -n "$NS" --ignore-not-found >/dev/null
+            retried=1
+        fi
+        sleep 3
+    done
+    echo "    ${run}: ${phase:-missing}"
+done
+
+# The regenerated Deployments come back with readOnlyRootFilesystem: true,
+# which the web-proxy cannot run under (exit 2, no logs — see
+# fix-web-proxy-rootfs.sh). Re-patch every serving Deployment, not a fixed list:
+# mesh-sre-agent was missing from the callers' lists and crash-looped for 13 days.
+DEPLOYS=$($K get deploy -n "$NS" -o name 2>/dev/null | grep -E 'web-endpoint-server$' | sed 's|.*/||' || true)
+echo "==> Re-applying the web-proxy rootfs fix"
+# shellcheck disable=SC2086
+KUBE_CONTEXT="$KCTX" bash "$SCRIPT_DIR/fix-web-proxy-rootfs.sh" $DEPLOYS
+
+echo "==> Waiting for serving Deployments to become ready…"
+for d in $DEPLOYS; do
+    $K rollout status "deploy/$d" -n "$NS" --timeout=180s || echo "    WARNING: $d not ready"
 done
 
 echo ""

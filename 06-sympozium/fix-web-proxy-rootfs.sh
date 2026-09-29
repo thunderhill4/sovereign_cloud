@@ -12,22 +12,24 @@
 
 set -euo pipefail
 SYMPOZIUM_NS="${SYMPOZIUM_NAMESPACE:-sympozium-system}"
+# KUBE_CONTEXT selects the cluster; unset keeps the current kubectl context.
+K="kubectl ${KUBE_CONTEXT:+--context $KUBE_CONTEXT}"
 
 for deploy in "$@"; do
     echo "  waiting for Deployment/$deploy..."
     for _ in $(seq 1 60); do
-        kubectl get deployment "$deploy" -n "$SYMPOZIUM_NS" &>/dev/null && break
+        $K get deployment "$deploy" -n "$SYMPOZIUM_NS" &>/dev/null && break
         sleep 2
     done
-    if ! kubectl get deployment "$deploy" -n "$SYMPOZIUM_NS" &>/dev/null; then
+    if ! $K get deployment "$deploy" -n "$SYMPOZIUM_NS" &>/dev/null; then
         echo "  WARNING: Deployment/$deploy never appeared, skipping" >&2
         continue
     fi
 
-    current=$(kubectl get deployment "$deploy" -n "$SYMPOZIUM_NS" \
+    current=$($K get deployment "$deploy" -n "$SYMPOZIUM_NS" \
         -o jsonpath='{.spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem}' 2>/dev/null || true)
     if [[ "$current" == "true" ]]; then
-        kubectl patch deployment "$deploy" -n "$SYMPOZIUM_NS" --type=json -p \
+        $K patch deployment "$deploy" -n "$SYMPOZIUM_NS" --type=json -p \
             '[{"op":"replace","path":"/spec/template/spec/containers/0/securityContext/readOnlyRootFilesystem","value":false}]'
         echo "  patched $deploy: readOnlyRootFilesystem=false"
     else
