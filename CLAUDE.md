@@ -394,9 +394,10 @@ The backend keeps one `target-cluster` pre-built and labeled `pool.local/state=W
 building (~34s). Delete tears down and the controller rebuilds a standby in the
 background. Invariant: at most one `target-cluster` at a time. Endpoint:
 `GET /api/v1/cluster/pool-status` → `{state: none|building|warm|claimed, clusterReady,
-lastError}`. **Opt-in**: `run-ui.sh` defaults `POOL_ENABLED=false`; export
-`POOL_ENABLED=true` before running it to have the backend auto-build/rebuild a standby
-in the background. **Fixed 2026-09-18**: `POOL_STANDBY_MANIFEST` default switched from
+lastError}`. **On by default** (since 2026-09-30): `run-ui.sh` defaults `POOL_ENABLED=true`, so the
+backend auto-builds/rebuilds a standby in the background; export `POOL_ENABLED=false`
+to turn it off. A pre-existing unlabeled `target-cluster` is left alone
+(`reconcileDecision`: unlabeled -> none); the pool builds only once none exists. **Fixed 2026-09-18**: `POOL_STANDBY_MANIFEST` default switched from
 `target-cluster-parallel.yaml` (`:latest`, which after the September upgrade still
 carried the pre-upgrade k3s v1.31.4 binary) to `target-cluster-warm.yaml`, matching the
 on-demand deploy path's default image; `buildStandby` now seeds the warm CA/token

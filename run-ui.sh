@@ -70,14 +70,16 @@ echo "Registry: dialing ${REGISTRY_URL} (displayed as ${REGISTRY_ALIAS})"
 export REGISTRY_URL REGISTRY_ALIAS
 
 # Warm pool config for target-cluster pre-deployment.
-# Opt-in: export POOL_ENABLED=true before running this script to have the
-# backend auto-build/rebuild a standby cluster in the background.
+# On by default (2026-09-30): the backend keeps one standby cluster built in the
+# background, so Deploy claims it in ~0.5s instead of building (~25s). Export
+# POOL_ENABLED=false to turn it off. An existing unlabeled target-cluster is left
+# alone; the pool builds only when no target-cluster exists.
 # Standby sizing is controlled by POOL_STANDBY_MANIFEST (point it at a
 # lite/parallel variant for smaller standbys) — there is no separate profile knob.
 # Default switched 2026-09-18 from target-cluster-parallel.yaml (:latest image,
 # still carrying the pre-upgrade k3s v1.31.4 binary per CLAUDE.md) to the warm
 # manifest, which matches the on-demand deploy path's default image.
-export POOL_ENABLED="${POOL_ENABLED:-false}"
+export POOL_ENABLED="${POOL_ENABLED:-true}"
 export POOL_STANDBY_MANIFEST="${POOL_STANDBY_MANIFEST:-03-target-cluster/target-cluster-warm.yaml}"
 export POOL_POLL_SECONDS="${POOL_POLL_SECONDS:-5}"
 
