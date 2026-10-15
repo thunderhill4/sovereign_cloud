@@ -4,6 +4,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestReconcileDecision(t *testing.T) {
@@ -29,9 +30,50 @@ func TestReconcileDecision(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := reconcileDecision(c.clusterExists, c.state, c.ready, c.opInFlight, c.building)
+			got := reconcileDecision(poolModeStandby, c.clusterExists, c.state, c.ready, c.opInFlight, c.building)
 			if got != c.want {
 				t.Fatalf("reconcileDecision(%v) = %v, want %v", c.name, got, c.want)
+			}
+		})
+	}
+}
+
+func TestReconcileDecisionOnDemand(t *testing.T) {
+	// No cluster: on-demand never builds ahead of use.
+	if got := reconcileDecision(poolModeOnDemand, false, "", false, false, false); got != ActionNone {
+		t.Fatalf("on-demand, no cluster = %v, want ActionNone", got)
+	}
+	// A half-built orphan is still repaired: someone asked for that cluster.
+	if got := reconcileDecision(poolModeOnDemand, true, "", false, false, false); got != ActionRebuild {
+		t.Fatalf("on-demand, unlabeled NotReady = %v, want ActionRebuild", got)
+	}
+}
+
+func TestIdleDecision(t *testing.T) {
+	const ttl = time.Hour
+	cases := []struct {
+		name       string
+		mode       string
+		exists     bool
+		state      string
+		opInFlight bool
+		building   bool
+		idle       time.Duration
+		want       bool
+	}{
+		{"claimed past ttl -> delete", poolModeOnDemand, true, poolStateClaimed, false, false, ttl, true},
+		{"warm past ttl -> delete", poolModeOnDemand, true, poolStateWarm, false, false, 2 * ttl, true},
+		{"claimed under ttl -> keep", poolModeOnDemand, true, poolStateClaimed, false, false, ttl - time.Second, false},
+		{"unlabeled past ttl -> keep (operator-managed)", poolModeOnDemand, true, "", false, false, 2 * ttl, false},
+		{"standby mode never reaps", poolModeStandby, true, poolStateClaimed, false, false, 2 * ttl, false},
+		{"op in flight -> keep", poolModeOnDemand, true, poolStateClaimed, true, false, 2 * ttl, false},
+		{"building -> keep", poolModeOnDemand, true, poolStateClaimed, false, true, 2 * ttl, false},
+		{"no cluster -> nothing to do", poolModeOnDemand, false, "", false, false, 2 * ttl, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := idleDecision(c.mode, c.exists, c.state, c.opInFlight, c.building, c.idle, ttl); got != c.want {
+				t.Fatalf("idleDecision = %v, want %v", got, c.want)
 			}
 		})
 	}

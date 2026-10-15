@@ -4,7 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { api } from '@/lib/api';
-import type { DeployLogEntry, TargetClusterStatus } from '@/lib/types';
+import type { DeployLogEntry, PoolStatus, TargetClusterStatus } from '@/lib/types';
 import {
   Play,
   Trash2,
@@ -93,6 +93,7 @@ export function ClusterManager() {
   const [profile, setProfile] = useState<'lite' | 'full'>('full');
   const [imageVariant, setImageVariant] = useState<'warm' | 'noble' | 'minimal'>('warm');
   const [poolStatus, setPoolStatus] = useState<'none' | 'building' | 'warm' | 'claimed'>('none');
+  const [pool, setPool] = useState<PoolStatus | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
 
   const refreshStatus = useCallback(async () => {
@@ -123,7 +124,7 @@ export function ClusterManager() {
     const poll = async () => {
       try {
         const s = await api.getPoolStatus();
-        if (alive) setPoolStatus(s.state);
+        if (alive) { setPoolStatus(s.state); setPool(s); }
       } catch { /* ignore */ }
     };
     poll();
@@ -307,14 +308,32 @@ export function ClusterManager() {
         </Card>
       </div>
 
-      {poolStatus === 'warm' && (
+      {pool?.mode !== 'ondemand' && poolStatus === 'warm' && (
         <div className="flex items-center gap-2 text-xs text-green-600">
           <span>⚡ Standby ready — Deploy claims instantly</span>
         </div>
       )}
-      {poolStatus === 'building' && (
+      {pool?.mode !== 'ondemand' && poolStatus === 'building' && (
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <span>Building standby… next Deploy will be instant once ready</span>
+        </div>
+      )}
+      {pool?.mode === 'ondemand' && poolStatus === 'none' && (
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <span>Sleeping — the cluster is built on first access (Deploy, kubectl via 172.18.255.223, or the target agent)</span>
+        </div>
+      )}
+      {pool?.mode === 'ondemand' && poolStatus === 'building' && (
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <span>Waking — building the cluster…</span>
+        </div>
+      )}
+      {pool?.mode === 'ondemand' && (poolStatus === 'claimed' || poolStatus === 'warm') && (
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <span>
+            Auto-deletes after {Math.round(pool.idleTTLSeconds / 60)} min without use —{' '}
+            {Math.max(0, Math.ceil((pool.idleTTLSeconds - pool.idleSeconds) / 60))} min left
+          </span>
         </div>
       )}
 

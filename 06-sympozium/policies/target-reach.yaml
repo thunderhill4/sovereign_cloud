@@ -21,6 +21,14 @@ spec:
         port: 443
       - host: 172.18.255.215
         port: 6443
+      # On-demand front door (ui/k8s/target-frontdoor.yaml): where the mounted
+      # kubeconfig points when the backend runs with POOL_MODE=ondemand.
+      - host: 172.18.255.223
+        port: 6443
+      # ...and the host listener that Service resolves to, for policy engines
+      # that match the destination after kube-proxy's DNAT.
+      - host: 172.18.0.1
+        port: 16443
   sandboxPolicy:
     allowHostMounts: false
     maxCPU: "4"

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -304,14 +305,51 @@ func runScriptWithStream(script string) error {
 	return cmd.Wait()
 }
 
+// frontDoorKubeconfig points a kubeconfig at the front door (activator.go).
+// tls-server-name keeps certificate verification against the address the API
+// server's cert actually carries.
+func frontDoorKubeconfig(kubeconfig string) string {
+	return kubeconfigServerRE.ReplaceAllString(kubeconfig,
+		"${1}server: https://"+targetFrontDoorIP+":6443\n${1}tls-server-name: "+targetLBIP)
+}
+
+var kubeconfigServerRE = regexp.MustCompile(`(?m)^(\s*)server: https://\S+$`)
+
+// publishTargetKubeconfig writes the kubeconfig users and agents get — the
+// repo-root file and the Secret target-cluster-agent mounts — from the direct
+// one at kubeconfigPath. In on-demand mode the published copy goes through the
+// front door, so using it wakes the cluster and counts as use; the /tmp copy
+// stays direct, so the backend's own polling does not.
+func publishTargetKubeconfig(kubeconfigPath string) {
+	dir := claudeDir()
+	kubeconfigLocal := filepath.Join(dir, targetClusterName+"-kubeconfig")
+	raw, err := os.ReadFile(kubeconfigPath)
+	if err != nil || len(raw) == 0 {
+		return
+	}
+	out := string(raw)
+	if poolMode() == poolModeOnDemand {
+		out = frontDoorKubeconfig(out)
+	}
+	if err := os.WriteFile(kubeconfigLocal, []byte(out), 0o600); err != nil {
+		log.Printf("could not write %s: %v", kubeconfigLocal, err)
+		return
+	}
+	// No-op if Sympozium isn't installed.
+	runShell(fmt.Sprintf("bash %s/06-sympozium/refresh-target-kubeconfig.sh %s 2>/dev/null || true", dir, kubeconfigLocal))
+}
+
 // waitForTargetReady waits for VMs to boot, fetches the kubeconfig, and waits
 // for the API server + nodes to be Ready. Streams progress to the deploy log.
 // Returns an error (so callers decide how to fail) instead of finishing.
 func waitForTargetReady(expectedVMs int) error {
-	dir := claudeDir()
 
 	deploy.addLog("step", "━━ Wait for VMs to Boot ━━")
+	// Polls are 1s (they were 10-15s): a warm build is Ready in under 20s, so
+	// coarser polling reported it tens of seconds late. Progress lines are
+	// logged only when they change.
 	vmTimeout := time.Now().Add(20 * time.Minute)
+	lastProgress := ""
 	for {
 		if time.Now().After(vmTimeout) {
 			return fmt.Errorf("timed out waiting for VMs after 20 minutes")
@@ -333,35 +371,33 @@ func waitForTargetReady(expectedVMs int) error {
 			"-l", "cluster.x-k8s.io/cluster-name="+targetClusterName,
 			"--no-headers", "--ignore-not-found")
 		dvCount := countNonEmpty(dvOut)
+		progress := fmt.Sprintf("  VMIs: %d/%d Running", running, total)
 		if dvCount > 0 || total == 0 {
-			deploy.addLog("info", fmt.Sprintf("  DataVolumes cloning: %d | VMIs: %d/%d Running", dvCount, running, total))
-		} else {
-			deploy.addLog("info", fmt.Sprintf("  VMIs: %d/%d Running", running, total))
+			progress = fmt.Sprintf("  DataVolumes cloning: %d | VMIs: %d/%d Running", dvCount, running, total)
+		}
+		if progress != lastProgress {
+			deploy.addLog("info", progress)
+			lastProgress = progress
 		}
 		if running >= expectedVMs {
 			break
 		}
-		time.Sleep(15 * time.Second)
+		time.Sleep(time.Second)
 	}
 	deploy.addLog("success", "✓ VMs are running")
 
 	deploy.addLog("step", "━━ Wait for Target API Server ━━")
 	kubeconfigPath := "/tmp/" + targetClusterName + "-kubeconfig"
-	kubeconfigLocal := filepath.Join(dir, targetClusterName+"-kubeconfig")
 	kcTimeout := time.Now().Add(3 * time.Minute)
 	gotKC := false
 	for time.Now().Before(kcTimeout) {
 		if err := runShell(fmt.Sprintf("clusterctl get kubeconfig %s > %s 2>/dev/null", targetClusterName, kubeconfigPath)); err == nil {
-			runShell(fmt.Sprintf("cp %s %s 2>/dev/null || true", kubeconfigPath, kubeconfigLocal))
-			// Keep the in-cluster Secret target-cluster-agent uses in sync with
-			// this deploy's kubeconfig (target CA changes on redeploy). No-op if
-			// Sympozium isn't installed.
-			runShell(fmt.Sprintf("bash %s/06-sympozium/refresh-target-kubeconfig.sh %s 2>/dev/null || true", dir, kubeconfigPath))
+			publishTargetKubeconfig(kubeconfigPath)
 			deploy.addLog("success", "✓ Kubeconfig retrieved → "+kubeconfigPath)
 			gotKC = true
 			break
 		}
-		time.Sleep(10 * time.Second)
+		time.Sleep(time.Second)
 	}
 	if !gotKC {
 		return fmt.Errorf("could not retrieve kubeconfig after 3 minutes")
@@ -376,7 +412,7 @@ func waitForTargetReady(expectedVMs int) error {
 		if time.Now().After(apiTimeout) {
 			return fmt.Errorf("API server not reachable after 5 minutes")
 		}
-		time.Sleep(10 * time.Second)
+		time.Sleep(time.Second)
 	}
 
 	nodesTimeout := time.Now().Add(3 * time.Minute)
@@ -389,7 +425,7 @@ func waitForTargetReady(expectedVMs int) error {
 			deploy.addLog("warn", "Nodes not all Ready yet — continuing")
 			break
 		}
-		time.Sleep(15 * time.Second)
+		time.Sleep(time.Second)
 	}
 	return nil
 }
@@ -554,6 +590,7 @@ func HandleDeployCluster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	touchTarget()
 	if pool.isBuilding() {
 		claimPending.Store(true) // a standby build is in flight — claim it when it finishes
 	}
@@ -776,6 +813,7 @@ func runDeletion() {
 	deploy.addLog("info", "KubeVirt deletes VMs, CDI removes cloned DataVolumes, CAPI removes Machines…")
 
 	vmTimeout := time.Now().Add(12 * time.Minute)
+	lastProgress := ""
 	for {
 		if time.Now().After(vmTimeout) {
 			deploy.addLog("warn", "Timed out waiting for cleanup — resources may still be deleting")
@@ -789,13 +827,16 @@ func runDeletion() {
 		dvs := countNonEmpty(dvOut)
 		machines := countNonEmpty(machineOut)
 
-		deploy.addLog("info", fmt.Sprintf("  VMIs: %d | DataVolumes: %d | Machines: %d", vmis, dvs, machines))
+		if progress := fmt.Sprintf("  VMIs: %d | DataVolumes: %d | Machines: %d", vmis, dvs, machines); progress != lastProgress {
+			deploy.addLog("info", progress)
+			lastProgress = progress
+		}
 
 		if vmis == 0 && dvs == 0 && machines == 0 {
 			deploy.addLog("success", "✓ All VMs, DataVolumes, and Machines removed!")
 			break
 		}
-		time.Sleep(15 * time.Second)
+		time.Sleep(2 * time.Second)
 	}
 
 	// ── Step 3: Confirm cluster resource is gone ───────────────────
@@ -815,12 +856,17 @@ func runDeletion() {
 		time.Sleep(5 * time.Second)
 	}
 
-	// Clean up kubeconfig files
+	// Clean up kubeconfig files. On-demand mode keeps the published one: it is
+	// what the next access wakes the cluster with, and the warm path's fixed
+	// CAs keep it valid across rebuilds.
 	kubeconfigPath := "/tmp/" + targetClusterName + "-kubeconfig"
-	kubeconfigLocal := filepath.Join(dir, targetClusterName+"-kubeconfig")
 	_ = os.Remove(kubeconfigPath)
-	_ = os.Remove(kubeconfigLocal)
-	deploy.addLog("info", "Kubeconfig files cleaned up")
+	if poolMode() != poolModeOnDemand {
+		_ = os.Remove(filepath.Join(dir, targetClusterName+"-kubeconfig"))
+		deploy.addLog("info", "Kubeconfig files cleaned up")
+	} else {
+		deploy.addLog("info", "Kubeconfig kept — the next access rebuilds the cluster")
+	}
 
 	deploy.addLog("step", "━━ Done! ━━")
 	deploy.addLog("success", "✓ Target cluster deleted successfully")

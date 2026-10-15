@@ -241,6 +241,9 @@ export interface PoolStatus {
   state: 'none' | 'building' | 'warm' | 'claimed';
   clusterReady: boolean;
   lastError: string;
+  mode: 'standby' | 'ondemand';
+  idleSeconds: number;
+  idleTTLSeconds: number;
 }
 
 // ── Istio 1.30 ambient mesh / Gateway API (07-istio-advanced) ──────────────

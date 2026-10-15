@@ -82,6 +82,19 @@ export REGISTRY_URL REGISTRY_ALIAS
 export POOL_ENABLED="${POOL_ENABLED:-true}"
 export POOL_STANDBY_MANIFEST="${POOL_STANDBY_MANIFEST:-03-target-cluster/target-cluster-warm.yaml}"
 export POOL_POLL_SECONDS="${POOL_POLL_SECONDS:-5}"
+# On-demand mode (default since 2026-10-13): no target cluster while nobody uses
+# it. The first access builds one (API answering in under 20s) and it is deleted
+# again after POOL_IDLE_TTL without use. "Access" is Deploy, chat to
+# target-cluster-agent, or any request through the front door at
+# 172.18.255.223:6443, which is where the published target-cluster-kubeconfig
+# points. Export POOL_MODE=standby for the old always-built standby.
+export POOL_MODE="${POOL_MODE:-ondemand}"
+export POOL_IDLE_TTL="${POOL_IDLE_TTL:-1h}"
+export TARGET_FRONTDOOR_ADDR="${TARGET_FRONTDOOR_ADDR:-172.18.0.1:16443}"
+if [[ "$POOL_MODE" == "ondemand" && "$POOL_ENABLED" != "false" ]]; then
+    kubectl --context kind-cluster2 apply -f "$SCRIPT_DIR/ui/k8s/target-frontdoor.yaml" >/dev/null \
+        || echo "WARNING: could not apply ui/k8s/target-frontdoor.yaml — kubectl via 172.18.255.223 will not work"
+fi
 
 cleanup() {
     echo "Shutting down..."

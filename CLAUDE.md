@@ -74,6 +74,7 @@ no-op, so cluster1 would advertise cluster2's range on the shared L2 segment.
 | 172.18.255.220  | host-ollama-lb (optional)      | `snippets/host-ollama/` (`WITH_LB=1`) |
 | 172.18.255.221  | Act 3 east-west gateway (cluster2) | `07-istio-advanced/act3-multicluster/02-...yaml` |
 | 172.18.255.222  | mesh-sre-agent (Sympozium)     | `sympozium-lb-setup.sh`             |
+| 172.18.255.223  | target-cluster front door (on-demand mode) | `ui/k8s/target-frontdoor.yaml` |
 
 **Note:** `.221` is outside the cluster2 pool as originally configured (`.211-.220`).
 `07-istio-advanced` widens that pool to `.211-.225` rather than reusing `.216`, which the
@@ -335,6 +336,9 @@ RUN_LAYA_GUARD=1                  # optional: start laya-serve on 127.0.0.1:$LAY
 LAYA_URL=                         # or point at an existing laya-serve; unset = guard off
 LAYA_API_KEY=                     # generated per run when RUN_LAYA_GUARD=1
 LAYA_BLOCK_THRESHOLD=0.6
+POOL_MODE=ondemand                # or standby; see "On-demand mode"
+POOL_IDLE_TTL=1h
+TARGET_FRONTDOOR_ADDR=172.18.0.1:16443
 ```
 
 ### `mesh-sre-agent` — Istio ambient mesh observability
@@ -417,6 +421,36 @@ the phase-timings.sh/time-to-ready.sh ghost-node finding above, confirmed live i
 code path too. Re-measured claim time, 3 runs: 1.059s / 0.467s / 0.465s — median
 **467ms** (a June figure of 194ms had gone unverified; see
 `book/chapters/09-warmth-is-mandatory.md`). Demo-only (fixed CA/token, single cluster).
+
+### On-demand mode (wake on access, delete when idle)
+
+`run-ui.sh` defaults `POOL_MODE=ondemand` (since 2026-10-13); export `POOL_MODE=standby`
+for the always-built standby above. In on-demand mode no `target-cluster` exists while
+nobody uses it, the first access builds one, and the pool controller deletes it after
+`POOL_IDLE_TTL` (default `1h`) without use. **Measured cold wake, first `kubectl` to
+answer: 15.3 / 15.3 / 15.7s** (both nodes Ready ~20.5s). Idle delete takes ~14s.
+
+- **Front door** (`ui/backend/handlers/activator.go`): the backend listens on
+  `172.18.0.1:16443` (`TARGET_FRONTDOOR_ADDR`), exposed as `172.18.255.223:6443` by a
+  selectorless Service + EndpointSlice (`ui/k8s/target-frontdoor.yaml`, applied by
+  `run-ui.sh`). API up: raw TCP splice to `.215`. API down: it terminates TLS with a cert
+  minted from `warm-ca/server-ca.key`, requires a client cert from the warm client CA,
+  starts the build, holds the request, then answers `503` + `Retry-After`, which
+  client-go retries by itself. The cluster stays on `.215`; its own nodes and the CAPI
+  controllers use that address constantly, so traffic there is not a usage signal.
+- **"Use"** = traffic through `.223`, Deploy, or chat to `target-cluster-agent`. The
+  published `target-cluster-kubeconfig` and the `sympozium-system/target-cluster-kubeconfig`
+  Secret point at `.223` with `tls-server-name: 172.18.255.215` (`publishTargetKubeconfig`
+  in `cluster_deploy.go`); the backend's own `/tmp/target-cluster-kubeconfig` stays
+  direct so its polling does not count. **`kubectl` straight at `.215` neither wakes the
+  cluster nor keeps it alive**, and `make verify` rewrites the repo-root file to `.215`.
+- Only clusters labeled `pool.local/state` are reaped; an unlabeled one is left alone.
+  The idle clock is in memory and restarts with the backend.
+- The kubeconfig survives a delete in this mode (it is what the next access wakes with).
+  That works only on the warm path, whose fixed CAs keep an old client cert valid.
+- **Needs the backend running**: with `run-ui.sh` stopped, `.223` does not answer and
+  nothing is deleted. An access during a teardown waits for it and misses 20s.
+  Non-client-go clients get one `503` on a cold wake and must retry.
 
 ## Infrastructure Conventions
 

@@ -1,0 +1,3 @@
+# Build output and tooling artifacts (see build-pdf.py / render-pdf.mjs).
+node_modules/
+dist/

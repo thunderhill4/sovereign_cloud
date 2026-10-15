@@ -46,11 +46,15 @@ func (a PoolAction) String() string {
 // reconcileDecision is the controller's pure decision: given the observed
 // cluster + in-flight flags, what should happen this tick. Honors the
 // single-cluster invariant — never builds while any cluster or op exists.
-func reconcileDecision(clusterExists bool, state string, ready bool, opInFlight bool, building bool) PoolAction {
+// In on-demand mode nothing is built ahead of use: wakeTarget does that.
+func reconcileDecision(mode string, clusterExists bool, state string, ready bool, opInFlight bool, building bool) PoolAction {
 	if opInFlight || building {
 		return ActionNone
 	}
 	if !clusterExists {
+		if mode == poolModeOnDemand {
+			return ActionNone
+		}
 		return ActionBuild
 	}
 	if state == poolStateClaimed {
@@ -98,6 +102,10 @@ type PoolStatus struct {
 	State        string `json:"state"` // none | building | warm | claimed
 	ClusterReady bool   `json:"clusterReady"`
 	LastError    string `json:"lastError"`
+	// On-demand mode: how long the cluster has gone unused, and when it is deleted.
+	Mode           string `json:"mode"` // standby | ondemand
+	IdleSeconds    int    `json:"idleSeconds"`
+	IdleTTLSeconds int    `json:"idleTTLSeconds"`
 }
 
 // poolState is the controller's in-memory view, surfaced via pool-status.
@@ -178,7 +186,12 @@ func observeCluster(ctx context.Context) (exists bool, state string, ready bool)
 func targetNodesReady(expected int) bool {
 	kubeconfig := "/tmp/" + targetClusterName + "-kubeconfig"
 	if _, err := os.Stat(kubeconfig); err != nil {
-		return false
+		// /tmp does not survive a reboot. Without this, a healthy cluster reads
+		// as NotReady and reconcileDecision tears it down to rebuild it.
+		if runShell(fmt.Sprintf("clusterctl get kubeconfig %s > %s.new 2>/dev/null && mv %s.new %s",
+			targetClusterName, kubeconfig, kubeconfig, kubeconfig)) != nil {
+			return false
+		}
 	}
 	out := kubectlGet("--kubeconfig="+kubeconfig, "get", "nodes",
 		"-o", "jsonpath={range .items[*]}{.metadata.name}={.status.conditions[?(@.type==\"Ready\")].status}{\"\\n\"}{end}")
@@ -224,7 +237,11 @@ func HandlePoolStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	writeJSON(w, pool.snapshot())
+	s := pool.snapshot()
+	s.Mode = poolMode()
+	s.IdleSeconds = int(targetIdleFor().Seconds())
+	s.IdleTTLSeconds = int(poolIdleTTL().Seconds())
+	writeJSON(w, s)
 }
 
 // claimPending is set when a user claims while a standby build is in flight, so
@@ -265,7 +282,15 @@ func poolReconcileTick(ctx context.Context) {
 	}
 
 	opInFlight := getCurrentOp() != ""
-	switch reconcileDecision(exists, state, ready, opInFlight, pool.isBuilding()) {
+	if idleDecision(poolMode(), exists, state, opInFlight, pool.isBuilding(), targetIdleFor(), poolIdleTTL()) {
+		setCurrentOp("idle-delete")
+		go runIdleDeletion()
+		return
+	}
+	if wakePending.Load() {
+		wakeTarget()
+	}
+	switch reconcileDecision(poolMode(), exists, state, ready, opInFlight, pool.isBuilding()) {
 	case ActionBuild:
 		if pool.claimAndSetBuilding() {
 			go buildStandby(false, false)
@@ -290,15 +315,11 @@ func runClaim() {
 		deploy.addLog("warn", "could not set claimed label: "+err.Error())
 	}
 	claimPending.Store(false)
-	// Refresh the local kubeconfig copy for downstream scripts (istio, verify).
+	// Refresh the kubeconfig copies for downstream scripts and target-cluster-agent.
 	kubeconfigPath := "/tmp/" + targetClusterName + "-kubeconfig"
-	kubeconfigLocal := filepath.Join(claudeDir(), targetClusterName+"-kubeconfig")
-	_ = runShell(fmt.Sprintf("clusterctl get kubeconfig %s > %s 2>/dev/null && cp %s %s 2>/dev/null || true",
-		targetClusterName, kubeconfigPath, kubeconfigPath, kubeconfigLocal))
-	// Sync the in-cluster Secret target-cluster-agent uses (target CA changes
-	// per standby). No-op if Sympozium isn't installed.
-	_ = runShell(fmt.Sprintf("bash %s/06-sympozium/refresh-target-kubeconfig.sh %s 2>/dev/null || true",
-		claudeDir(), kubeconfigPath))
+	_ = runShell(fmt.Sprintf("clusterctl get kubeconfig %s > %s 2>/dev/null || true", targetClusterName, kubeconfigPath))
+	publishTargetKubeconfig(kubeconfigPath)
+	touchTarget()
 
 	pool.setBuildState("claimed", "")
 	pool.setReady(true)
@@ -306,6 +327,20 @@ func runClaim() {
 	deploy.addLog("success", "✓ Standby claimed — cluster is up and Ready")
 	deploy.addLog("step", "━━ Done! ━━")
 	deploy.finish("done")
+}
+
+// runIdleDeletion deletes a cluster nobody has used for POOL_IDLE_TTL. The
+// caller has already set the current op.
+func runIdleDeletion() {
+	deploy.resetForNewRun()
+	deploy.addLog("step", fmt.Sprintf("━━ Target cluster unused for %s — deleting ━━", poolIdleTTL()))
+	runDeletion()
+	pool.setBuildState("none", "")
+	pool.setReady(false)
+	// An access that arrived mid-teardown gets its build now, not a tick later.
+	if wakePending.Load() {
+		wakeTarget()
+	}
 }
 
 // buildStandby builds the standby cluster off the user's clock. If claimAfter

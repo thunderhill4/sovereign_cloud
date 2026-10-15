@@ -52,22 +52,31 @@ chapters/              the manuscript, one Markdown file per chapter
 figures/               figure SVGs, plus a brief for the ones not yet drawn
 measurements/          raw data behind the measured claims, and how it was taken
 draft-notes-archive.md every open question, stripped out of the manuscript
-html/                  rendered pages (html/index.html is the table of contents)
-tools/build_chapter.py renders one chapter to a styled HTML page
-tools/build_all.sh     renders every chapter with its part label
+build-pdf.py           assembles the chapters into one print-styled HTML file
+render-pdf.mjs          prints that HTML to PDF via headless Chrome
+dist/                  build output (gitignored): book.html, Own-Your-Cloud.pdf
 ```
 
 ## Rendering
 
 ```bash
-pip install markdown
-./tools/build_all.sh          # one styled HTML page per chapter, in html/
-./tools/build_pdf.sh          # the whole book as a single PDF
+python3 build-pdf.py                  # chapters -> dist/book.html
+npm install --no-save puppeteer-core  # once; drives the system Chrome, no download
+node render-pdf.mjs                   # dist/book.html -> dist/Own-Your-Cloud.pdf
 ```
 
-Each chapter page is self-contained HTML with light and dark themes; fonts load from Google Fonts.
-
-`build_pdf.sh` assembles every chapter into one print-styled document (figures inlined as data URIs, so it is a single self-contained file), renders it with headless Chrome, then uses Ghostscript to add page numbers and nested bookmarks — Chrome implements neither. The result is **`own-your-cloud.pdf`**: A4, 195 pages, a clickable contents page, 27 bookmarks, and vector figures. It needs `google-chrome` or `chromium`; `gs` and `poppler-utils` are optional and only affect page numbers and bookmarks.
+`build-pdf.py` (stdlib `markdown` only, no network) walks the chapters in reading
+order — prologue, 1–20, epilogue, appendices — inlines each figure's SVG directly
+(so the HTML is one self-contained file, no relative paths to resolve), and wraps
+the result in a print stylesheet: 6×9in trim, `Linux Libertine` body text and
+`Liberation Mono` code, both installed locally, so nothing is fetched from Google
+Fonts or anywhere else. `render-pdf.mjs` drives the **system** Chrome via
+`puppeteer-core` (`CHROME_PATH`, default `/usr/bin/google-chrome-stable`; no
+Chromium download) and adds real page numbers via Chrome's own footer template.
+Current output: 201 pages. No clickable outline/bookmarks yet — `qpdf` and
+`pypdf` weren't available on the machine this was built on, and installing
+either wasn't worth reaching for `pip --break-system-packages`; a later pass can
+add them without touching the two scripts above.
 
 ## License
 

@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 400" width="720" height="400"
      role="img" aria-labelledby="t52 d52" font-family="'Source Serif 4', Georgia, serif">
   <title id="t52">Figure 5.2 — Six layers: a pod inside a VM inside a pod inside a container</title>
-  <desc id="d52">Six nested boxes. Outermost, the workstation, one laptop running Linux. Inside it, a Docker container which is the Kind node cluster2-control-plane. Inside that, a Kubernetes pod, the virt-launcher pod. Inside that, a virtual machine run by KubeVirt and QEMU, which is a node of the target k3s cluster. Inside that, a Kubernetes pod belonging to the target cluster. Innermost, the container that actually runs the workload.</desc>
+  <desc id="d52">Six nested boxes. Outermost, the workstation, one host running Linux. Inside it, a Docker container which is the Kind node cluster2-control-plane. Inside that, a Kubernetes pod, the virt-launcher pod. Inside that, a virtual machine run by KubeVirt and QEMU, which is a node of the target k3s cluster. Inside that, a Kubernetes pod belonging to the target cluster. Innermost, the container that actually runs the workload.</desc>
 
   <style>
     :root, svg {
@@ -28,7 +28,7 @@
   <rect class="box" x="20" y="34" width="680" height="316"/>
   <text class="n"   x="34" y="54">1</text>
   <text class="lbl" x="50" y="54">The workstation</text>
-  <text class="sub" x="50" y="70">one laptop · Linux · 24 threads, 29.96 GiB</text>
+  <text class="sub" x="50" y="70">one host · Linux · 24 threads, 29.96 GiB</text>
 
   <!-- 2 docker container = kind node -->
   <rect class="box" x="44" y="82" width="632" height="250"/>

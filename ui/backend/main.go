@@ -51,6 +51,8 @@ func main() {
 
 	// Pool controller: keep one warm standby cluster pre-built.
 	go handlers.RunPoolController(context.Background())
+	// On-demand mode only: wake-on-access front door for the target API.
+	go handlers.StartTargetFrontDoor()
 
 	mux := http.NewServeMux()
 

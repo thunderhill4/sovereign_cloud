@@ -221,6 +221,10 @@ func HandleAIChat(w http.ResponseWriter, r *http.Request) {
 		agentName = getDefaultAgent()
 	}
 	agentURL := getSympoziumAgentURL(agentName) + "v1/chat/completions"
+	if agentName == targetAgentName {
+		// Start the build now rather than at the agent's first tool call.
+		wakeTarget()
+	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
