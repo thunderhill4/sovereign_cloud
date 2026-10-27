@@ -75,7 +75,7 @@ spec:
         enabled: false
   authRefs:
     - provider: ollama
-      secret: llm-credentials
+      secret: target-cluster-agent-llm-credentials
   skills:
     - skillPackRef: web-endpoint     # drives declarative serving (requiresServer=true)
     - skillPackRef: target-k8s-ops   # kubectl INSIDE target-cluster, for task (chat) runs

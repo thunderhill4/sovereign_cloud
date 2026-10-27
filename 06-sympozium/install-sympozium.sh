@@ -178,6 +178,15 @@ kubectl create secret generic llm-credentials \
     --from-literal=apiKey="$LLM_API_KEY" \
     -n "$SYMPOZIUM_NS" \
     --dry-run=client -o yaml | kubectl apply -f -
+# 0.11.0+: an Agent may not share a key Secret with another Agent (the admission
+# webhook refuses the serving run). cluster2-agent keeps llm-credentials; the
+# others get their own copy of the same key.
+for agent in mesh-sre-agent target-cluster-agent incident-responder cost-analyzer; do
+    kubectl create secret generic "${agent}-llm-credentials" \
+        --from-file=apiKey=<(kubectl get secret llm-credentials -n "$SYMPOZIUM_NS" -o jsonpath='{.data.apiKey}' | base64 -d) \
+        -n "$SYMPOZIUM_NS" \
+        --dry-run=client -o yaml | kubectl apply -f -
+done
 
 echo ""
 echo "== 4/5 Applying Phase-0 core bundle (policies + warm schedule + cluster2-agent) =="
