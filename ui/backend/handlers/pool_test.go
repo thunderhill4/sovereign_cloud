@@ -194,6 +194,19 @@ func TestPoolSetBuildState(t *testing.T) {
 	}
 }
 
+func TestPoolRetryKeepsLastError(t *testing.T) {
+	p := &poolState{state: "none"}
+	p.setBuildState("none", "apply failed: webhook timeout")
+	p.setStateKeepError("building")
+	if s := p.snapshot(); s.State != "building" || s.LastError != "apply failed: webhook timeout" {
+		t.Fatalf("retry cleared the error: %+v", s)
+	}
+	p.setBuildState("warm", "")
+	if s := p.snapshot(); s.LastError != "" {
+		t.Fatalf("success kept the error: %+v", s)
+	}
+}
+
 func TestClaimAndSetBuildingExclusive(t *testing.T) {
 	p := &poolState{state: "none"}
 	const n = 50

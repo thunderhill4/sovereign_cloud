@@ -139,6 +139,14 @@ func (p *poolState) setBuildState(state, errMsg string) {
 	p.lastErr = errMsg
 }
 
+// setStateKeepError changes state but leaves lastErr alone, so a retry that
+// starts right after a failure keeps the cause on screen until it succeeds.
+func (p *poolState) setStateKeepError(state string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.state = state
+}
+
 func (p *poolState) setReady(ready bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -417,7 +425,7 @@ func buildStandby(claimAfter bool, predelete bool) {
 	}()
 
 	deploy.resetForNewRun()
-	pool.setBuildState("building", "")
+	pool.setStateKeepError("building")
 	if predelete {
 		deploy.addLog("step", "━━ Rebuilding standby — tearing down degraded cluster ━━")
 		if err := runShell("kubectl delete cluster " + targetClusterName + " --ignore-not-found --timeout=120s"); err != nil {

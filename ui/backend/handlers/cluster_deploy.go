@@ -225,12 +225,53 @@ func (w lineWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// stderrTail streams stderr into the deploy log like lineWriter{"warn"} and
+// remembers the last line worth reporting, so a failed command's error says
+// why (e.g. a webhook timeout) instead of only "exit status 1". kubectl's
+// "Warning:" deprecation notices are skipped unless they are all there is.
+type stderrTail struct{ lastLine, lastWarning string }
+
+func (w *stderrTail) Write(p []byte) (int, error) {
+	lineWriter{"warn"}.Write(p)
+	for _, line := range strings.Split(string(p), "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "":
+		case strings.HasPrefix(line, "Warning:"):
+			w.lastWarning = line
+		default:
+			w.lastLine = line
+		}
+	}
+	return len(p), nil
+}
+
+func (w *stderrTail) last() string {
+	if w.lastLine != "" {
+		return w.lastLine
+	}
+	return w.lastWarning
+}
+
+// runWithStderr runs cmd with stderr streamed to the deploy log and, on
+// failure, appends the last meaningful stderr line to the error.
+func runWithStderr(cmd *exec.Cmd) error {
+	var tail stderrTail
+	cmd.Stderr = &tail
+	if err := cmd.Run(); err != nil {
+		if msg := tail.last(); msg != "" {
+			return fmt.Errorf("%w: %s", err, msg)
+		}
+		return err
+	}
+	return nil
+}
+
 func runShell(script string) error {
 	cmd := exec.Command("bash", "-c", script)
 	cmd.Env = os.Environ()
 	cmd.Stdout = lineWriter{"info"}
-	cmd.Stderr = lineWriter{"warn"}
-	return cmd.Run()
+	return runWithStderr(cmd)
 }
 
 // renderTemplate loads the template at path and substitutes the map values
@@ -262,8 +303,7 @@ func applyStdin(yaml string) error {
 	cmd.Env = os.Environ()
 	cmd.Stdin = strings.NewReader(yaml)
 	cmd.Stdout = lineWriter{"info"}
-	cmd.Stderr = lineWriter{"warn"}
-	return cmd.Run()
+	return runWithStderr(cmd)
 }
 
 func shellCheck(script string) bool {

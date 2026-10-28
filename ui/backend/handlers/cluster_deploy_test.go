@@ -32,3 +32,26 @@ func TestFinishFailedDoesNotLogElapsedTime(t *testing.T) {
 		t.Errorf("did not expect elapsed time log on failure, got %q", last.Message)
 	}
 }
+
+func TestStderrTailKeepsLastErrorLine(t *testing.T) {
+	var w stderrTail
+	w.Write([]byte("Warning: cluster.x-k8s.io/v1beta1 Cluster is deprecated\n"))
+	w.Write([]byte("Error from server (InternalError): failed calling webhook \"x\": context deadline exceeded\n"))
+	w.Write([]byte("Warning: trailing deprecation notice\n\n"))
+	if got := w.last(); got != `Error from server (InternalError): failed calling webhook "x": context deadline exceeded` {
+		t.Fatalf("last() = %q", got)
+	}
+}
+
+func TestRunShellErrorCarriesStderr(t *testing.T) {
+	err := runShell("echo 'Warning: noise' >&2; echo 'Error: the real cause' >&2; echo 'Warning: more noise' >&2; exit 1")
+	if err == nil || err.Error() != "exit status 1: Error: the real cause" {
+		t.Fatalf("err = %v", err)
+	}
+	if err := runShell("echo 'Warning: only noise' >&2; exit 3"); err == nil || err.Error() != "exit status 3: Warning: only noise" {
+		t.Fatalf("all-warning stderr: err = %v", err)
+	}
+	if err := runShell("echo fine >&2"); err != nil {
+		t.Fatalf("success: err = %v", err)
+	}
+}
