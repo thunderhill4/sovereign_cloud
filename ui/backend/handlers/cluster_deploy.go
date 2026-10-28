@@ -834,16 +834,18 @@ func HandleTargetClusterStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// API server + Istio reachability.
-	// Deploy writes the kubeconfig to both /tmp and the repo root; /tmp does not
-	// survive a host reboot, so fall back to the repo-local copy — otherwise a
-	// perfectly healthy cluster reports "API server unreachable". Deletion removes
-	// both, so the local copy only exists while a cluster does.
-	kubeconfigPath := "/tmp/" + targetClusterName + "-kubeconfig"
-	if _, err := os.Stat(kubeconfigPath); err != nil {
-		kubeconfigPath = filepath.Join(claudeDir(), targetClusterName+"-kubeconfig")
+	// API server + Istio reachability, only while a Cluster exists. Deploy
+	// writes the kubeconfig to /tmp and the repo root; /tmp does not survive a
+	// host reboot, so backendTargetKubeconfig falls back to the repo copy, but
+	// never to a front-door one: this endpoint is polled by the UI and sovctl,
+	// and probing through 172.18.255.223 right after an idle delete woke the
+	// cluster straight back up.
+	kubeconfigPath := backendTargetKubeconfig()
+	if status.ClusterPhase != "" && kubeconfigPath == "" && hostedCP() {
+		// Hosted: the <cluster>-kubeconfig Secret outlives reboots; refetch it.
+		kubeconfigPath, _ = directTargetKubeconfig()
 	}
-	if _, err := os.Stat(kubeconfigPath); err == nil {
+	if status.ClusterPhase != "" && kubeconfigPath != "" {
 		status.APIReady = shellCheck(fmt.Sprintf(
 			"kubectl --kubeconfig=%s get nodes --request-timeout=3s 2>/dev/null", kubeconfigPath))
 		status.IstioReady = shellCheck(fmt.Sprintf(

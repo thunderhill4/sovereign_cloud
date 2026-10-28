@@ -497,7 +497,9 @@ answer: 15.3 / 15.3 / 15.7s** (both nodes Ready ~20.5s). Idle delete takes ~14s.
   published `target-cluster-kubeconfig` and the `sympozium-system/target-cluster-kubeconfig`
   Secret point at `.223` with `tls-server-name: 172.18.255.215` (`publishTargetKubeconfig`
   in `cluster_deploy.go`); the backend's own `/tmp/target-cluster-kubeconfig` stays
-  direct so its polling does not count. **`kubectl` straight at `.215` neither wakes the
+  direct so its polling does not count. Every backend read of the target (target-status, mesh topology, cross-cluster
+  probes) must go through `backendTargetKubeconfig()`, which never returns the `.223` copy: before
+  2026-10-28 they fell back to it once the idle delete removed `/tmp`, and woke the cluster right back up. **`kubectl` straight at `.215` neither wakes the
   cluster nor keeps it alive**, and `make verify` rewrites the repo-root file to `.215`.
 - **Delete from the UI ≠ idle delete.** A UI Delete (`POST /cluster/delete` or
   `DELETE /cluster/target-delete`) marks the target **stopped**: the ConfigMap
