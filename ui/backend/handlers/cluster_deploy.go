@@ -36,9 +36,12 @@ type imageVariant struct {
 // parallel worker boot. Targets time-to-ready <40s. Selecting it switches the
 // deploy to the warm template + secret-seed step (see runDeployment).
 var imageVariants = map[string]imageVariant{
-	"warm":    {Image: "172.18.0.2:5000/ubuntu-noble-k3s:warm", Label: "Warm fast-path (~40s, parallel boot)"},
-	"noble":   {Image: "172.18.0.2:5000/ubuntu-noble-k3s:preinit", Label: "Ubuntu Noble (pre-init)"},
-	"minimal": {Image: "172.18.0.2:5000/ubuntu-minimal-k3s:preinit", Label: "Ubuntu Minimal (pre-init)"},
+	// Hosted control plane (default, TARGET_CP_MODE=hosted): two agent VMs join
+	// the resident k3s server pod. See hosted.go.
+	hostedImageKey: {Image: "172.18.0.2:5000/ubuntu-noble-k3s:agent", Label: "Hosted control plane + 2 agent VMs (~9s)"},
+	"warm":         {Image: "172.18.0.2:5000/ubuntu-noble-k3s:warm", Label: "Warm fast-path (~18s, VM control plane)"},
+	"noble":        {Image: "172.18.0.2:5000/ubuntu-noble-k3s:preinit", Label: "Ubuntu Noble (pre-init)"},
+	"minimal":      {Image: "172.18.0.2:5000/ubuntu-minimal-k3s:preinit", Label: "Ubuntu Minimal (pre-init)"},
 }
 
 // warmImageKey is the imageVariants key that triggers the warm fast-path.
@@ -456,7 +459,15 @@ func runDeployment(profile, image string) {
 		return
 	}
 	if !imgOK {
-		fail(fmt.Sprintf("Unknown image %q. Valid: noble, minimal.", image))
+		fail(fmt.Sprintf("Unknown image %q. Valid: hosted, warm, noble, minimal.", image))
+		return
+	}
+	if !imageAllowed(cpMode(), image) {
+		if hostedCP() {
+			fail(fmt.Sprintf("Image %q boots a VM control plane, but this backend runs the hosted control plane (TARGET_CP_MODE=hosted), which owns %s. Use the hosted image, or restart with TARGET_CP_MODE=vm after `kubectl delete ns %s`.", image, targetLBIP, hostedCPNamespace))
+		} else {
+			fail("The hosted image needs TARGET_CP_MODE=hosted.")
+		}
 		return
 	}
 
@@ -526,8 +537,13 @@ func runDeployment(profile, image string) {
 
 	// ── Step 4: Apply cluster manifests ───────────────────────────
 	warm := image == warmImageKey
+	hosted := image == hostedImageKey
 	deploy.addLog("step", "━━ Step 4/6: Deploy Target Cluster ━━")
-	deploy.addLog("info", "Applying CAPI resources (Cluster, KubevirtCluster, KThreesControlPlane, MachineDeployment).")
+	if hosted {
+		deploy.addLog("info", "Applying CAPI resources (Cluster, KubevirtCluster, MachineDeployment of 2 agent VMs); the control plane is the resident k3s server.")
+	} else {
+		deploy.addLog("info", "Applying CAPI resources (Cluster, KubevirtCluster, KThreesControlPlane, MachineDeployment).")
+	}
 	deploy.addLog("info", "Profile: "+profSpec.Label)
 	deploy.addLog("info", "Image:   "+imgSpec.Label+" ("+imgSpec.Image+")")
 	deploy.addLog("info", "API server will be exposed at "+targetLBIP+":6443 via MetalLB")
@@ -536,7 +552,16 @@ func runDeployment(profile, image string) {
 	// material baked into the :warm image (no CA conflict → no --cluster-reset),
 	// then apply the warm template (parallel worker boot). Targets <40s.
 	tmplName := "03-target-cluster/target-cluster.tmpl.yaml"
-	if warm {
+	if hosted {
+		tmplName = "03-target-cluster/target-cluster-hosted.tmpl.yaml"
+		if err := ensureHostedCP(deploy.addLog); err != nil {
+			fail(err.Error())
+			return
+		}
+		if err := deleteTargetNodes(); err != nil {
+			deploy.addLog("warn", "could not clear stale target Nodes: "+err.Error())
+		}
+	} else if warm {
 		tmplName = "03-target-cluster/target-cluster-warm.tmpl.yaml"
 		deploy.addLog("info", "Warm fast-path — seeding fixed CA + token secrets so KThrees adopts the baked material...")
 		if err := runScriptWithStream("bash " + filepath.Join(dir, "scripts/seed-cluster-secrets.sh")); err != nil {
@@ -591,6 +616,9 @@ func HandleDeployCluster(w http.ResponseWriter, r *http.Request) {
 	}
 
 	touchTarget()
+	if targetStoppedByUser() {
+		setTargetStopped(false) // Deploy is the one thing that brings it back
+	}
 	if pool.isBuilding() {
 		claimPending.Store(true) // a standby build is in flight — claim it when it finishes
 	}
@@ -601,7 +629,7 @@ func HandleDeployCluster(w http.ResponseWriter, r *http.Request) {
 		}
 		image := r.URL.Query().Get("image")
 		if _, ok := imageVariants[image]; !ok {
-			image = warmImageKey
+			image = defaultImageKey()
 		}
 
 		// Fast path: claim a hot standby if one exists and is Ready.
@@ -782,7 +810,10 @@ func countNonEmpty(s string) int {
 	return n
 }
 
-func runDeletion() {
+// runDeletion tears the target cluster down. byUser is a Delete from the UI:
+// the caller has already marked the target stopped, so nothing rebuilds it
+// until the next Deploy. An idle delete (byUser=false) stays wakeable.
+func runDeletion(byUser bool) {
 	defer setCurrentOp("")
 	defer func() {
 		if r := recover(); r != nil {
@@ -856,16 +887,33 @@ func runDeletion() {
 		time.Sleep(5 * time.Second)
 	}
 
+	// Hosted path: the resident server keeps the agents' Node objects (CAPI does
+	// not delete them for this cluster shape), still marked Ready. Remove them,
+	// or the next build's "2 Nodes Ready" and the front door would see ghosts.
+	if hostedCP() {
+		if err := deleteTargetNodes(); err != nil {
+			deploy.addLog("warn", "Could not delete the old Node objects: "+err.Error())
+		} else {
+			deploy.addLog("success", "✓ Old Node objects removed from the hosted control plane")
+		}
+	}
+
 	// Clean up kubeconfig files. On-demand mode keeps the published one: it is
 	// what the next access wakes the cluster with, and the warm path's fixed
 	// CAs keep it valid across rebuilds.
 	kubeconfigPath := "/tmp/" + targetClusterName + "-kubeconfig"
 	_ = os.Remove(kubeconfigPath)
-	if poolMode() != poolModeOnDemand {
+	switch {
+	case poolMode() != poolModeOnDemand:
 		_ = os.Remove(filepath.Join(dir, targetClusterName+"-kubeconfig"))
 		deploy.addLog("info", "Kubeconfig files cleaned up")
-	} else {
+	case byUser:
+		deploy.addLog("info", "Kubeconfig kept — access through it is refused until the next Deploy")
+	default:
 		deploy.addLog("info", "Kubeconfig kept — the next access rebuilds the cluster")
+	}
+	if byUser {
+		deploy.addLog("info", "Deleted from the UI — it stays down until you Deploy again")
 	}
 
 	deploy.addLog("step", "━━ Done! ━━")
@@ -885,9 +933,10 @@ func HandleDeleteClusterStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	setTargetStopped(true)
 	deploy.resetForNewRun()
 	setCurrentOp("delete")
-	go runDeletion()
+	go runDeletion(true)
 
 	streamDeployLogs(w, r)
 }
@@ -975,13 +1024,21 @@ func HandleDeleteCluster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	setTargetStopped(true)
 	log.Println("Deleting target cluster...")
 	go func() {
 		out, err := exec.Command("kubectl", "delete", "cluster", targetClusterName, "--ignore-not-found").CombinedOutput()
 		if err != nil {
 			log.Printf("Error deleting cluster: %v: %s", err, out)
-		} else {
-			log.Printf("Cluster deletion initiated: %s", out)
+			return
+		}
+		log.Printf("Cluster deletion initiated: %s", out)
+		if hostedCP() {
+			// The Nodes outlive the Cluster on the hosted path (see hosted.go).
+			_ = exec.Command("kubectl", "wait", "--for=delete", "cluster/"+targetClusterName, "--timeout=180s").Run()
+			if err := deleteTargetNodes(); err != nil {
+				log.Printf("Could not delete target Nodes: %v", err)
+			}
 		}
 	}()
 

@@ -1,6 +1,10 @@
 package handlers
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -30,7 +34,7 @@ func TestReconcileDecision(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := reconcileDecision(poolModeStandby, c.clusterExists, c.state, c.ready, c.opInFlight, c.building)
+			got := reconcileDecision(poolModeStandby, false, c.clusterExists, c.state, c.ready, c.opInFlight, c.building)
 			if got != c.want {
 				t.Fatalf("reconcileDecision(%v) = %v, want %v", c.name, got, c.want)
 			}
@@ -40,12 +44,36 @@ func TestReconcileDecision(t *testing.T) {
 
 func TestReconcileDecisionOnDemand(t *testing.T) {
 	// No cluster: on-demand never builds ahead of use.
-	if got := reconcileDecision(poolModeOnDemand, false, "", false, false, false); got != ActionNone {
+	if got := reconcileDecision(poolModeOnDemand, false, false, "", false, false, false); got != ActionNone {
 		t.Fatalf("on-demand, no cluster = %v, want ActionNone", got)
 	}
 	// A half-built orphan is still repaired: someone asked for that cluster.
-	if got := reconcileDecision(poolModeOnDemand, true, "", false, false, false); got != ActionRebuild {
+	if got := reconcileDecision(poolModeOnDemand, false, true, "", false, false, false); got != ActionRebuild {
 		t.Fatalf("on-demand, unlabeled NotReady = %v, want ActionRebuild", got)
+	}
+}
+
+func TestReconcileDecisionStoppedByUser(t *testing.T) {
+	// Deleted from the UI: the standby pool must not bring it back.
+	if got := reconcileDecision(poolModeStandby, true, false, "", false, false, false); got != ActionNone {
+		t.Fatalf("standby, stopped, no cluster = %v, want ActionNone", got)
+	}
+	if got := reconcileDecision(poolModeOnDemand, true, false, "", false, false, false); got != ActionNone {
+		t.Fatalf("on-demand, stopped, no cluster = %v, want ActionNone", got)
+	}
+}
+
+func TestWakeTargetWhileStoppedDoesNotBuild(t *testing.T) {
+	t.Setenv("POOL_MODE", poolModeOnDemand)
+	t.Setenv("POOL_ENABLED", "true")
+	targetStopped.Store(true)
+	defer targetStopped.Store(false)
+	wakeMu.Lock()
+	lastWakeTry = time.Time{}
+	wakeMu.Unlock()
+	wakeTarget()
+	if pool.isBuilding() || wakePending.Load() {
+		t.Fatal("a wake while stopped must not start or queue a build")
 	}
 }
 
@@ -76,6 +104,58 @@ func TestIdleDecision(t *testing.T) {
 				t.Fatalf("idleDecision = %v, want %v", got, c.want)
 			}
 		})
+	}
+	if idleDecision(poolModeOnDemand, true, poolStateClaimed, false, false, 100*ttl, 0) {
+		t.Fatal("ttl 0 means never: must not delete")
+	}
+}
+
+func TestPoolIdleTTLPrecedence(t *testing.T) {
+	defer idleTTLOverride.Store(-1)
+	t.Setenv("POOL_IDLE_TTL", "")
+	if d, src := poolIdleTTLWithSource(); d != time.Hour || src != idleTTLSourceDefault {
+		t.Fatalf("default = %s/%s, want 1h/default", d, src)
+	}
+	t.Setenv("POOL_IDLE_TTL", "20m")
+	if d, src := poolIdleTTLWithSource(); d != 20*time.Minute || src != idleTTLSourceEnv {
+		t.Fatalf("env = %s/%s, want 20m/env", d, src)
+	}
+	idleTTLOverride.Store(int64(5 * time.Minute))
+	if d, src := poolIdleTTLWithSource(); d != 5*time.Minute || src != idleTTLSourceUI {
+		t.Fatalf("ui = %s/%s, want 5m/ui", d, src)
+	}
+	idleTTLOverride.Store(0)
+	if d, src := poolIdleTTLWithSource(); d != 0 || src != idleTTLSourceUI {
+		t.Fatalf("ui never = %s/%s, want 0/ui", d, src)
+	}
+}
+
+func TestHandlePoolSettings(t *testing.T) {
+	defer idleTTLOverride.Store(-1)
+	cases := []struct {
+		body string
+		code int
+	}{
+		{`{"idleTTLSeconds": 900}`, http.StatusOK},
+		{`{"idleTTLSeconds": 0}`, http.StatusOK},
+		{`{"idleTTLSeconds": 30}`, http.StatusBadRequest},
+		{`{"idleTTLSeconds": 90000}`, http.StatusBadRequest},
+		{`{}`, http.StatusBadRequest},
+		{`nope`, http.StatusBadRequest},
+	}
+	for _, c := range cases {
+		rec := httptest.NewRecorder()
+		HandlePoolSettings(rec, httptest.NewRequest(http.MethodPut, "/api/v1/cluster/pool-settings", strings.NewReader(c.body)))
+		if rec.Code != c.code {
+			t.Fatalf("%s: code %d, want %d", c.body, rec.Code, c.code)
+		}
+	}
+	idleTTLOverride.Store(-1)
+	rec := httptest.NewRecorder()
+	HandlePoolSettings(rec, httptest.NewRequest(http.MethodPut, "/", strings.NewReader(`{"idleTTLSeconds": 600}`)))
+	var s PoolStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &s); err != nil || s.IdleTTLSeconds != 600 || s.IdleTTLSource != idleTTLSourceUI {
+		t.Fatalf("response = %+v (%v), want 600s from ui", s, err)
 	}
 }
 
@@ -134,5 +214,17 @@ func TestClaimAndSetBuildingExclusive(t *testing.T) {
 	}
 	if !p.isBuilding() {
 		t.Fatal("building flag should be set after a win")
+	}
+}
+
+func TestSnapshotDeleting(t *testing.T) {
+	p := &poolState{state: "warm", ready: true}
+	if s := p.snapshot(); s.Deleting {
+		t.Fatal("no deletionTimestamp -> not deleting")
+	}
+	p.setDeletingSince(time.Now().Add(-5 * time.Minute))
+	s := p.snapshot()
+	if !s.Deleting || s.DeletingSeconds < 299 {
+		t.Fatalf("snapshot = %+v, want deleting for ~300s", s)
 	}
 }

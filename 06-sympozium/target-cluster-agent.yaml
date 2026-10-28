@@ -69,7 +69,10 @@ metadata:
 spec:
   agents:
     default:
-      model: llama3.2
+      # qwen2.5:7b, like cluster2-agent / mesh-sre-agent. llama3.2 wrote its tool
+      # calls as plain text (malformed JSON, tool_calls=0) and then invented
+      # namespaces; measured 2026-10-23 against a probe pod with this kubeconfig.
+      model: qwen2.5:7b
       baseURL: http://host-ollama.sympozium-system.svc.cluster.local:11434/v1
       sandbox:
         enabled: false
@@ -85,7 +88,7 @@ spec:
   memory:
     enabled: false
     maxSizeKB: 256
-    # Environment briefing — keep SHORT (llama3.2). Edit here; re-run the installer.
+    # Environment briefing — keep SHORT (7B model). Edit here; re-run the installer.
     systemPrompt: |
       You are the workload operator for "target-cluster", a k3s cluster. Your kubectl talks DIRECTLY to the target cluster's own API via a mounted kubeconfig — you see ITS namespaces, deployments, pods, services, events, and Istio workloads. Use normal commands: kubectl get namespaces; kubectl get pods -A; kubectl get deploy,svc -A.
       Context: target-cluster's nodes are KubeVirt VMs hosted on a separate "cluster2" management cluster (which runs CAPI, KubeVirt, MetalLB, Sympozium). You do NOT operate cluster2 or the VMs themselves — you only see inside the target cluster. cluster1 is another separate cluster you cannot reach. Read-only unless the user explicitly approves a change.
