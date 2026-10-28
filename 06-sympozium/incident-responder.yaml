@@ -45,7 +45,7 @@ spec:
         enabled: false
   authRefs:
     - provider: ollama
-      secret: llm-credentials
+      secret: incident-responder-llm-credentials
   skills:
     - skillPackRef: k8s-ops
     - skillPackRef: web-endpoint

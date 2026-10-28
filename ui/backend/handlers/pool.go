@@ -2,7 +2,9 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -46,13 +48,14 @@ func (a PoolAction) String() string {
 // reconcileDecision is the controller's pure decision: given the observed
 // cluster + in-flight flags, what should happen this tick. Honors the
 // single-cluster invariant — never builds while any cluster or op exists.
-// In on-demand mode nothing is built ahead of use: wakeTarget does that.
-func reconcileDecision(mode string, clusterExists bool, state string, ready bool, opInFlight bool, building bool) PoolAction {
+// In on-demand mode nothing is built ahead of use: wakeTarget does that. A
+// cluster the user deleted from the UI (stopped) is not rebuilt in either mode.
+func reconcileDecision(mode string, stopped bool, clusterExists bool, state string, ready bool, opInFlight bool, building bool) PoolAction {
 	if opInFlight || building {
 		return ActionNone
 	}
 	if !clusterExists {
-		if mode == poolModeOnDemand {
+		if mode == poolModeOnDemand || stopped {
 			return ActionNone
 		}
 		return ActionBuild
@@ -105,7 +108,14 @@ type PoolStatus struct {
 	// On-demand mode: how long the cluster has gone unused, and when it is deleted.
 	Mode           string `json:"mode"` // standby | ondemand
 	IdleSeconds    int    `json:"idleSeconds"`
-	IdleTTLSeconds int    `json:"idleTTLSeconds"`
+	IdleTTLSeconds int    `json:"idleTTLSeconds"` // 0 = never auto-delete
+	IdleTTLSource  string `json:"idleTTLSource"`  // default | env | ui
+	// Deleted from the UI: stays down until the next Deploy.
+	Stopped bool `json:"stopped"`
+	// The Cluster has a deletionTimestamp; how long it has been deleting. A
+	// teardown that runs for minutes is stuck (e.g. the CAPK controller is down).
+	Deleting        bool `json:"deleting"`
+	DeletingSeconds int  `json:"deletingSeconds"`
 }
 
 // poolState is the controller's in-memory view, surfaced via pool-status.
@@ -116,6 +126,8 @@ type poolState struct {
 	ready    bool
 	lastErr  string
 	building bool
+	// deletingSince is the observed Cluster's deletionTimestamp; zero if none.
+	deletingSince time.Time
 }
 
 var pool = &poolState{state: "none"}
@@ -127,10 +139,24 @@ func (p *poolState) setBuildState(state, errMsg string) {
 	p.lastErr = errMsg
 }
 
+// setStateKeepError changes state but leaves lastErr alone, so a retry that
+// starts right after a failure keeps the cause on screen until it succeeds.
+func (p *poolState) setStateKeepError(state string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.state = state
+}
+
 func (p *poolState) setReady(ready bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.ready = ready
+}
+
+func (p *poolState) setDeletingSince(t time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.deletingSince = t
 }
 
 func (p *poolState) setBuilding(b bool) {
@@ -158,60 +184,55 @@ func (p *poolState) claimAndSetBuilding() bool {
 func (p *poolState) snapshot() PoolStatus {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return PoolStatus{State: p.state, ClusterReady: p.ready, LastError: p.lastErr}
+	s := PoolStatus{State: p.state, ClusterReady: p.ready, LastError: p.lastErr}
+	if !p.deletingSince.IsZero() {
+		s.Deleting = true
+		s.DeletingSeconds = int(time.Since(p.deletingSince).Seconds())
+	}
+	return s
 }
 
 // observeCluster reads the live target Cluster: whether it exists, its
 // pool.local/state label, and whether 2 nodes are Ready.
 func observeCluster(ctx context.Context) (exists bool, state string, ready bool) {
+	exists, state, ready, _ = observeClusterDeletion(ctx)
+	return exists, state, ready
+}
+
+// observeClusterDeletion is observeCluster plus the Cluster's deletionTimestamp
+// (zero if it is not being deleted). A Cluster being deleted is never ready:
+// its VMs, and so its Nodes, can stay up for as long as the teardown is stuck.
+func observeClusterDeletion(ctx context.Context) (exists bool, state string, ready bool, deletingSince time.Time) {
 	obj, err := k8sclient.DynamicClient.Resource(capiClusterGVR).Namespace("default").Get(ctx, targetClusterName, metav1.GetOptions{})
 	if err != nil {
-		return false, "", false
+		return false, "", false, time.Time{}
 	}
 	state = obj.GetLabels()[poolStateLabel]
-	ready = targetNodesReady(2)
-	return true, state, ready
+	if ts := obj.GetDeletionTimestamp(); ts != nil {
+		return true, state, false, ts.Time
+	}
+	return true, state, targetNodesReady(2), time.Time{}
 }
 
 // targetNodesReady reports whether >= expected nodes are Ready on the target
-// cluster (via its kubeconfig at /tmp/<name>-kubeconfig).
+// cluster (via its kubeconfig at /tmp/<name>-kubeconfig, refetched from the
+// <cluster>-kubeconfig Secret when /tmp lost it).
 //
-// Counts by NAME, not by raw count: the :warm golden image carries a ghost
-// Node object (named after the bake VM, e.g. "ubuntu-bake-vm-warm") left over
-// from baking, still marked Ready until an async cleanup step removes it. A
-// bare count of Ready nodes can hit `expected` from control-plane + ghost
-// before the real worker ever joins — the same bug Chapter 7 of the book
-// found in phase-timings.sh/time-to-ready.sh. Only nodes named
-// "<cluster>-cp-*" or "<cluster>-workers-*" count.
+// Counts by NAME, not by raw count (countReadyTargetNodes): the :warm golden
+// image carries a ghost Node object named after the bake VM, still marked Ready
+// until an async cleanup removes it, so a bare count could hit `expected` before
+// the real worker joins. On the hosted path both VMs are "<cluster>-workers-*"
+// agents and nothing else is a Node, so the same rule holds.
 func targetNodesReady(expected int) bool {
-	kubeconfig := "/tmp/" + targetClusterName + "-kubeconfig"
-	if _, err := os.Stat(kubeconfig); err != nil {
-		// /tmp does not survive a reboot. Without this, a healthy cluster reads
-		// as NotReady and reconcileDecision tears it down to rebuild it.
-		if runShell(fmt.Sprintf("clusterctl get kubeconfig %s > %s.new 2>/dev/null && mv %s.new %s",
-			targetClusterName, kubeconfig, kubeconfig, kubeconfig)) != nil {
-			return false
-		}
+	kubeconfig, err := directTargetKubeconfig()
+	if err != nil {
+		// /tmp does not survive a reboot. Without the refetch, a healthy cluster
+		// reads as NotReady and reconcileDecision tears it down to rebuild it.
+		return false
 	}
 	out := kubectlGet("--kubeconfig="+kubeconfig, "get", "nodes",
 		"-o", "jsonpath={range .items[*]}{.metadata.name}={.status.conditions[?(@.type==\"Ready\")].status}{\"\\n\"}{end}")
-	cpPrefix := targetClusterName + "-cp-"
-	workerPrefix := targetClusterName + "-workers-"
-	ready := 0
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		name, status, found := strings.Cut(line, "=")
-		if !found || status != "True" {
-			continue
-		}
-		if strings.HasPrefix(name, cpPrefix) || strings.HasPrefix(name, workerPrefix) {
-			ready++
-		}
-	}
-	return ready >= expected
+	return countReadyTargetNodes(out, targetClusterName) >= expected
 }
 
 // labelTargetCluster sets pool.local/state=<state> on the target Cluster.
@@ -237,11 +258,50 @@ func HandlePoolStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	writeJSON(w, currentPoolStatus())
+}
+
+func currentPoolStatus() PoolStatus {
 	s := pool.snapshot()
 	s.Mode = poolMode()
 	s.IdleSeconds = int(targetIdleFor().Seconds())
-	s.IdleTTLSeconds = int(poolIdleTTL().Seconds())
-	writeJSON(w, s)
+	ttl, src := poolIdleTTLWithSource()
+	s.IdleTTLSeconds = int(ttl.Seconds())
+	s.IdleTTLSource = src
+	s.Stopped = targetStoppedByUser()
+	return s
+}
+
+// HandlePoolSettings: PUT /api/v1/cluster/pool-settings {"idleTTLSeconds": N}
+// sets the on-demand idle TTL (0 = never). It is a setting change, not use, so
+// the idle clock is not reset: a TTL below the current idle time deletes the
+// cluster on the next tick. DELETE drops the override (back to POOL_IDLE_TTL).
+func HandlePoolSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodDelete {
+		clearIdleTTLOverride()
+		log.Printf("pool settings: idle TTL override cleared from the UI/CLI")
+		writeJSON(w, currentPoolStatus())
+		return
+	}
+	if r.Method != http.MethodPut {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var body struct {
+		IdleTTLSeconds *int `json:"idleTTLSeconds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.IdleTTLSeconds == nil {
+		writeError(w, http.StatusBadRequest, "body must be {\"idleTTLSeconds\": N}")
+		return
+	}
+	d := time.Duration(*body.IdleTTLSeconds) * time.Second
+	if !validIdleTTL(d) {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("idleTTLSeconds must be 0 (never) or %d-%d", int(idleTTLMin.Seconds()), int(idleTTLMax.Seconds())))
+		return
+	}
+	setIdleTTLOverride(d)
+	log.Printf("pool settings: idle TTL set to %s from the UI", d)
+	writeJSON(w, currentPoolStatus())
 }
 
 // claimPending is set when a user claims while a standby build is in flight, so
@@ -267,7 +327,8 @@ func RunPoolController(ctx context.Context) {
 }
 
 func poolReconcileTick(ctx context.Context) {
-	exists, state, ready := observeCluster(ctx)
+	exists, state, ready, deletingSince := observeClusterDeletion(ctx)
+	pool.setDeletingSince(deletingSince)
 	// Refresh the UI cache from observed truth (unless mid-build).
 	if !pool.isBuilding() {
 		switch {
@@ -281,6 +342,12 @@ func poolReconcileTick(ctx context.Context) {
 		pool.setReady(ready)
 	}
 
+	// A teardown is already under way: wait for it. Rebuilding now would only
+	// time out on the same delete and apply onto a Cluster that is going away.
+	if !deletingSince.IsZero() {
+		return
+	}
+
 	opInFlight := getCurrentOp() != ""
 	if idleDecision(poolMode(), exists, state, opInFlight, pool.isBuilding(), targetIdleFor(), poolIdleTTL()) {
 		setCurrentOp("idle-delete")
@@ -290,7 +357,7 @@ func poolReconcileTick(ctx context.Context) {
 	if wakePending.Load() {
 		wakeTarget()
 	}
-	switch reconcileDecision(poolMode(), exists, state, ready, opInFlight, pool.isBuilding()) {
+	switch reconcileDecision(poolMode(), targetStoppedByUser(), exists, state, ready, opInFlight, pool.isBuilding()) {
 	case ActionBuild:
 		if pool.claimAndSetBuilding() {
 			go buildStandby(false, false)
@@ -334,7 +401,7 @@ func runClaim() {
 func runIdleDeletion() {
 	deploy.resetForNewRun()
 	deploy.addLog("step", fmt.Sprintf("━━ Target cluster unused for %s — deleting ━━", poolIdleTTL()))
-	runDeletion()
+	runDeletion(false)
 	pool.setBuildState("none", "")
 	pool.setReady(false)
 	// An access that arrived mid-teardown gets its build now, not a tick later.
@@ -358,22 +425,43 @@ func buildStandby(claimAfter bool, predelete bool) {
 	}()
 
 	deploy.resetForNewRun()
-	pool.setBuildState("building", "")
+	pool.setStateKeepError("building")
 	if predelete {
 		deploy.addLog("step", "━━ Rebuilding standby — tearing down degraded cluster ━━")
-		_ = runShell("kubectl delete cluster " + targetClusterName + " --ignore-not-found --timeout=120s")
+		if err := runShell("kubectl delete cluster " + targetClusterName + " --ignore-not-found --timeout=120s"); err != nil {
+			// Still deleting: applying now would land on a Cluster that is going
+			// away. The next tick sees the deletionTimestamp and waits.
+			pool.setBuildState("none", "teardown did not finish in 120s; is the CAPK controller running? "+err.Error())
+			claimPending.Store(false)
+			deploy.finish("failed")
+			return
+		}
 	}
 	deploy.addLog("step", "━━ Building warm standby cluster (background) ━━")
 
 	manifest := os.Getenv("POOL_STANDBY_MANIFEST")
 	if manifest == "" {
-		manifest = "03-target-cluster/target-cluster-warm.yaml"
+		manifest = defaultStandbyManifest()
 	}
 	manifestPath := filepath.Join(claudeDir(), manifest)
-	// Warm manifest needs the fixed CA/token secrets seeded first so KThrees
-	// adopts the material already baked into the :warm image (no CA conflict,
-	// no --cluster-reset) — same order as the on-demand deploy path.
-	if strings.Contains(manifest, "target-cluster-warm") {
+	if strings.Contains(manifest, "target-cluster-hosted") {
+		// Hosted path: the resident server must be up and the kubeconfig Secret
+		// seeded before the agents boot. Clear Nodes a failed teardown may have
+		// left, or the new Machines would never match "2 Ready" by name.
+		deploy.addLog("info", "Hosted control plane — making sure the resident k3s server is up...")
+		if err := ensureHostedCP(deploy.addLog); err != nil {
+			pool.setBuildState("none", err.Error())
+			claimPending.Store(false)
+			deploy.finish("failed")
+			return
+		}
+		if err := deleteTargetNodes(); err != nil {
+			deploy.addLog("warn", "could not clear stale target Nodes: "+err.Error())
+		}
+	} else if strings.Contains(manifest, "target-cluster-warm") {
+		// Warm manifest needs the fixed CA/token secrets seeded first so KThrees
+		// adopts the material already baked into the :warm image (no CA conflict,
+		// no --cluster-reset) — same order as the on-demand deploy path.
 		deploy.addLog("info", "Warm standby — seeding fixed CA + token secrets so KThrees adopts the baked material...")
 		if err := runShell("bash " + filepath.Join(claudeDir(), "scripts/seed-cluster-secrets.sh")); err != nil {
 			pool.setBuildState("none", "failed to seed warm-path secrets: "+err.Error())
@@ -382,6 +470,7 @@ func buildStandby(claimAfter bool, predelete bool) {
 			return
 		}
 	}
+	ensureRegistryPulls(deploy.addLog)
 	if err := runShell("kubectl apply -f " + manifestPath); err != nil {
 		pool.setBuildState("none", "apply failed: "+err.Error())
 		claimPending.Store(false)

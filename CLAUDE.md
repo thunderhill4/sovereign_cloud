@@ -66,7 +66,7 @@ no-op, so cluster1 would advertise cluster2's range on the shared L2 segment.
 | 172.18.255.212  | sympozium-apiserver (UI)       | `sympozium-lb-setup.sh`             |
 | 172.18.255.213  | cluster2-agent (Sympozium)     | `sympozium-lb-setup.sh`             |
 | 172.18.255.214  | target-cluster-agent (Sympozium) | `sympozium-lb-setup.sh`           |
-| 172.18.255.215  | target-cluster API server      | `03-target-cluster/target-cluster.yaml` |
+| 172.18.255.215  | target-cluster API server — hosted k3s server pod (default) or the VM control plane's CAPK Service (`TARGET_CP_MODE=vm`), never both | `03-target-cluster/hosted-cp/service.yaml` / `target-cluster*.yaml` |
 | 172.18.255.216  | target-cluster-nginx proxy (legacy `05-istio` demo, allocated only while it runs) | cross-cluster demo |
 | 172.18.255.217  | security-agent                 | `ui/k8s/security-agent.yaml`        |
 | 172.18.255.218  | cost-analyzer (Sympozium)      | `sympozium-lb-setup.sh`             |
@@ -96,11 +96,42 @@ make sympozium-lb       # expose Sympozium serving Services via MetalLB
 make ui                 # launch web UI dev servers
 ```
 
+### Hosted control plane — the default since 2026-10-21
+
+The target cluster's k3s **server** is a resident pod on cluster2 (`03-target-cluster/hosted-cp/`,
+namespace `target-cp`, `--disable-agent`, warm CAs + token, LoadBalancer on `.215`), and **both
+KubeVirt VMs are agents** booted from the `:agent` image (`BAKE_MODE=agent`). Both nodes Ready in
+**~8.5-9.5s** (median ~9s) from apply; a cold on-demand wake answered a plain
+`kubectl get nodes` with 2 Ready nodes in 10.4s. Full record, constraints and rejected levers:
+`docs/sub-60s-cluster-strategy.md` §12.
+
+- `make target-cluster` = `make target-cluster-hosted` (runs `make hosted-cp`: `scripts/seed-hosted-cp.sh`
+  + `kubectl apply -k 03-target-cluster/hosted-cp`). `make hosted-cp-verify` = 24 deterministic checks.
+  Time it with `scripts/time-to-ready-hosted.sh --runs 3` (`time-to-ready-by-name.sh` and
+  `phase-timings.sh` still assume a `-cp-` node).
+- `:agent` image: `make bake-image-agent build-containerdisk-agent pre-pull-agent` (~5 min; delete the
+  `ubuntu-noble-k3s-agent` DV first). cloud-init is **disabled** in it; containerd runs as its own
+  early unit; the containerDisk is **uncompressed** (`QCOW2_COMPRESS=0`).
+- **The UI backend follows `TARGET_CP_MODE`** (`run-ui.sh` default `hosted`; `vm` = the warm VM
+  control plane). In hosted mode `run-ui.sh` starts the server pod, Deploy defaults to the `hosted`
+  image and refuses VM-control-plane images, the pool builds `target-cluster-hosted.yaml`, and
+  every teardown deletes the agents' Node objects (CAPI does not for a cluster without a
+  `controlPlaneRef`; the resident server would keep them, still Ready). The front door's "up"
+  is "2 target Nodes Ready" (`targetUsable`), since the API always answers and returns 401 to
+  unauthenticated `/readyz`.
+- **`.215` has one owner.** To go back to the VM control plane: delete the target cluster,
+  `kubectl delete ns target-cp`, start the backend with `TARGET_CP_MODE=vm`.
+  `seed-hosted-cp.sh` refuses while a `KThreesControlPlane` exists.
+- `<cluster>-kubeconfig` is **seeded by us** (client-ca signed admin cert, no ownerReference, so it
+  survives Cluster deletion). Without it CAPI auto-creates one from the *server* CA, which k3s rejects.
+- Not yet updated: the mesh topology view (`mesh.go`, `TopologyView.tsx`) still draws a
+  control-plane VM.
+
 ### Cluster Lifecycle
 
 ```bash
-make target-cluster            # DEFAULT — WARM fast-path (parallel boot, 18.1s both nodes measured 2026-09-30)
-make target-cluster-warm       # same warm fast-path, explicit
+make target-cluster            # DEFAULT — HOSTED control plane + 2 agent VMs (~9s both nodes, 2026-10-21)
+make target-cluster-warm       # VM control plane, warm fast-path (18.1s both nodes, 2026-09-30)
 make target-cluster-lite       # legacy lite, 2 CPU / 4Gi (sequential, :latest)
 make target-cluster-full       # legacy full, 4 CPU / 8Gi (sequential, :latest)
 make target-cluster-parallel   # full profile, worker boots in parallel (~61s, :latest)
@@ -222,6 +253,25 @@ The `run-ui.sh` script sets all Sympozium env vars and launches both servers:
 
 Production deploy: `cd ui/k8s && ./build-and-deploy.sh` → available at `http://172.18.255.211`
 
+### `sovctl` — the dashboard from the terminal
+
+`make sovctl` builds `bin/sovctl` (`ui/backend/cmd/sovctl/`, stdlib + gorilla/websocket);
+`make sovctl-install` links it into `~/.local/bin`. It is a thin client over the same backend API
+the dashboard uses (`--server` / `SOVCTL_SERVER`, default `http://localhost:8080`), so it needs
+`make ui` running. `sovctl help [command]` lists everything; `-o json` on any command; destructive
+ones ask unless `-y`. Claude Code: `/sovctl <args>` (`.claude/commands/sovctl.md`).
+
+- Clusters: `status`, `clusters`, `cluster deploy|delete|logs|istio|wait`
+- Idle auto-delete: `timer`, `timer set 15m|1h30m|never`, `timer reset` (back to `POOL_IDLE_TTL`)
+- Resources: `nodes`, `pods`, `namespaces`, `events`, `vms`, `vm <ns>/<name>`, `images`, `registry ls|config|rm`
+- Mesh: `mesh topology|overview|gateways|waypoint|multicluster|ai-gateway|observability|probe|identity-probe|failover`;
+  `connections [--watch]`, `connections scale`
+- AI: `ai agents|chat|approve|config|console`; security: `security rules|scan|scan-registry`
+- `config` (all env-driven backend settings, secrets shown only as set/unset), `shell` (web terminal), `completion bash|zsh`
+
+Not covered: the Sympozium console's own features (runs, schedules, policies); `ai console` prints its URL.
+`ai agents` adds agents configured only by `SYMPOZIUM_AGENT_URL_*`, which the backend's own list misses.
+
 ### Golden Image
 
 ```bash
@@ -282,6 +332,9 @@ make registry     # inspect images in local registry at 172.18.0.2:5000
 | GET | `/api/v1/cluster/deploy/logs` | Stream current deploy logs (SSE) |
 | POST | `/api/v1/cluster/delete` | Delete target cluster (SSE stream) |
 | GET | `/api/v1/cluster/target-status` | Target cluster CAPI status |
+| GET | `/api/v1/cluster/pool-status` | Pool / on-demand state, idle timer, `deleting` |
+| PUT / DELETE | `/api/v1/cluster/pool-settings` | Set idle TTL `{"idleTTLSeconds":N}` (0 = never) / drop the override |
+| GET | `/api/v1/config` | Effective env-driven settings (pool, images, profiles, registry, AI); secrets as set/unset only |
 | DELETE | `/api/v1/cluster/target-delete` | Delete target cluster |
 | POST | `/api/v1/cluster/istio` | Install Istio on target cluster (SSE stream) |
 | GET | `/api/v1/images` | CDI DataVolumes |
@@ -318,7 +371,7 @@ The backend proxies AI chat to Sympozium agents via their OpenAI-compatible serv
 - Auth: `Authorization: Bearer $SYMPOZIUM_API_TOKEN` (optional; token comes from the `sympozium-ui-token` Secret created by Sympozium)
 - Agent URL resolution: env var `SYMPOZIUM_AGENT_URL_<NAME_UPPER>` → `SYMPOZIUM_AGENT_URL` (default agent) → in-cluster DNS `http://<name>-server.<namespace>.svc.cluster.local:8080/`
 - Agent list: backend queries the Kubernetes API for `SympoziumInstance` CRs in `$SYMPOZIUM_NAMESPACE` (serving-enabled only) via the dynamic client
-- Timeout: 120 seconds per request
+- Timeout: `AI_CHAT_TIMEOUT` per chat, tool calls included (default `5m`, accepted 30s-30m; was a fixed 120s, which cut off qwen3:8b's 90-120s answers)
 - SSE buffer: 256KB scanner buffer for large lines
 - Pre-model guard (`handlers/guard.go`): when `LAYA_URL` is set, the newest user message is first scored by a local Laya classifier (`laya-serve`, `POST /v1/systemone`, english checkpoint) on two yes/no questions: destructive request, and instruction override / secret / privilege request. If either score is ≥ `LAYA_BLOCK_THRESHOLD` (default 0.6), the chat gets an `error` envelope and the agent is never called, so no AgentRun is created. It fails open (logged) when Laya is unset or unreachable. Every verdict is logged. The question wording is what was measured (30 labelled prompts: recall 0.93, FPR 0.00 at 0.6), so re-measure before editing it. This is a mitigation, not a boundary; it doesn't replace toolGating or per-run RBAC.
 
@@ -336,7 +389,9 @@ RUN_LAYA_GUARD=1                  # optional: start laya-serve on 127.0.0.1:$LAY
 LAYA_URL=                         # or point at an existing laya-serve; unset = guard off
 LAYA_API_KEY=                     # generated per run when RUN_LAYA_GUARD=1
 LAYA_BLOCK_THRESHOLD=0.6
+AI_CHAT_TIMEOUT=5m                # whole-chat deadline; shown by `sovctl ai config`
 POOL_MODE=ondemand                # or standby; see "On-demand mode"
+TARGET_CP_MODE=hosted             # or vm; see "Hosted control plane"
 POOL_IDLE_TTL=1h
 TARGET_FRONTDOOR_ADDR=172.18.0.1:16443
 ```
@@ -404,8 +459,8 @@ new `Agent` CRs never appear there. Reachable directly on `.222` or via
 The backend keeps one `target-cluster` pre-built and labeled `pool.local/state=WARM`
 (reconcile goroutine in `ui/backend/handlers/pool.go`). Deploy **claims** a warm standby
 (relabel `CLAIMED`, refresh kubeconfig, streamed SSE) in well under a second instead of
-building (~34s). Delete tears down and the controller rebuilds a standby in the
-background. Invariant: at most one `target-cluster` at a time. Endpoint:
+building (~34s). Delete tears down and leaves the target stopped (no standby rebuild) until the next
+Deploy; see "Delete from the UI ≠ idle delete" below. Invariant: at most one `target-cluster` at a time. Endpoint:
 `GET /api/v1/cluster/pool-status` → `{state: none|building|warm|claimed, clusterReady,
 lastError}`. **On by default** (since 2026-09-30): `run-ui.sh` defaults `POOL_ENABLED=true`, so the
 backend auto-builds/rebuilds a standby in the background; export `POOL_ENABLED=false`
@@ -442,8 +497,36 @@ answer: 15.3 / 15.3 / 15.7s** (both nodes Ready ~20.5s). Idle delete takes ~14s.
   published `target-cluster-kubeconfig` and the `sympozium-system/target-cluster-kubeconfig`
   Secret point at `.223` with `tls-server-name: 172.18.255.215` (`publishTargetKubeconfig`
   in `cluster_deploy.go`); the backend's own `/tmp/target-cluster-kubeconfig` stays
-  direct so its polling does not count. **`kubectl` straight at `.215` neither wakes the
+  direct so its polling does not count. Every backend read of the target (target-status, mesh topology, cross-cluster
+  probes) must go through `backendTargetKubeconfig()`, which never returns the `.223` copy: before
+  2026-10-28 they fell back to it once the idle delete removed `/tmp`, and woke the cluster right back up. **`kubectl` straight at `.215` neither wakes the
   cluster nor keeps it alive**, and `make verify` rewrites the repo-root file to `.215`.
+- **Delete from the UI ≠ idle delete.** A UI Delete (`POST /cluster/delete` or
+  `DELETE /cluster/target-delete`) marks the target **stopped**: the ConfigMap
+  `default/kubeui-target-state` (so it survives a backend restart), surfaced as `stopped` in
+  `pool-status`. While stopped nothing brings it back: the front door answers
+  `503 "deleted from the UI; Deploy it again"` with **no** `Retry-After` (kubectl fails at once
+  instead of retrying), chat to `target-cluster-agent` does not wake it, and the standby pool
+  does not rebuild (in either `POOL_MODE`). Only **Deploy** clears it. An idle delete does not
+  set it, so the next access still wakes the cluster (verified 2026-10-21: refused in 0.2s
+  while stopped, the flag kept across a restart, Deploy 11s, idle delete then wake 12.3s).
+  To clear it by hand: `kubectl delete cm kubeui-target-state`.
+- **Idle timer is settable from the UI** (Cluster Manager → "Auto-delete after idle": 15 min-4 h presets,
+  custom 1-1440 min, or Never): `PUT /api/v1/cluster/pool-settings {"idleTTLSeconds": N}` (0 = never). It
+  overrides `POOL_IDLE_TTL`, persists in ConfigMap `default/kubeui-pool-settings` (delete it to fall back to
+  the env value), and does not reset the idle clock, so a TTL below the current idle time deletes on the next
+  tick. The header badge shows live state (Up / Waking / Deleting / Asleep / Stopped) from `pool-status` on every page.
+- **A teardown needs the CAPK controller.** If it is down (e.g. `ImagePullBackOff` on
+  `capk-manager:*-kubeui2` after a host restart moved the registry IP: fix with `make registry-fix`; the backend now does this itself, see below), the
+  Cluster sits in `Deleting` forever while its VMs and Nodes stay up. `pool-status` reports `deleting` +
+  `deletingSeconds` (UI: "Deleting (stuck)" after 3 min) and the pool controller waits rather than
+  rebuild-looping (before 2026-10-23 it re-ran a 120s delete + apply every tick, which also blocked idle deletes).
+- **Registry self-heal** (`handlers/registry_heal.go`, 2026-10-28): every 30s, and right before each
+  target-cluster apply, the backend looks for pods stuck in `ImagePullBackOff`/`ErrImagePull` on an image
+  from `REGISTRY_ALIAS`. If it finds any, it re-runs `scripts/fix-registry-hosts.sh` and deletes the stuck
+  ReplicaSet-owned pods (virt-launcher pods are left to kubelet). At most once per 2 min. It needs `docker`,
+  so it works only when the backend runs on the host (`run-ui.sh`), not in-cluster. Failed `kubectl` calls
+  now put their last stderr line in `pool-status.lastError`, which survives retries until a build succeeds.
 - Only clusters labeled `pool.local/state` are reaped; an unlabeled one is left alone.
   The idle clock is in memory and restarts with the backend.
 - The kubeconfig survives a delete in this mode (it is what the next access wakes with).
@@ -725,4 +808,18 @@ The UI is deployed to the `kubeui` namespace on cluster2 (`ui/k8s/kubeui.yaml`):
   (a stale `--as=sympozium-agent` check reporting healthy while real traffic breaks) won't
   announce itself.
 
+- **Fourth cause of the web-proxy "exit 2, zero log output" crash loop (found 2026-10-23, chart 0.10.87):
+  NetworkPolicy.** Serving pods are labeled `sympozium.ai/component=agent-server`, but the chart's NATS
+  egress rule (`sympozium-web-proxy-allow-ingress`) selects `component=web-proxy`, and the Egress policies
+  that do select them (`sympozium-allow-otel`, `sympozium-allow-ollama`) omit port 4222. The web-proxy then
+  blocks forever in JetStream `ensureStream` before binding :8080 and the liveness probe kills it; all
+  three agents had ~2,900 restarts over 23 days and chat failed with "no route to host". Fixed by
+  `06-sympozium/agent-server-allow-eventbus.yaml` (in the kustomize bundle). How it was found, for the
+  next time this symptom appears: `kill -QUIT` the web-proxy PID from the Kind node (Go prints every
+  goroutine's stack to the container log), and NATS `/connz` on :8222 to see whether the pod connects at all.
+- **Chat works, but the 7B models' tool calls are a coin flip.** Measured 2026-10-23 with identical
+  questions: `cluster2-agent` and `target-cluster-agent` (both `qwen2.5:7b`) each made a real tool call
+  in 1 of 3 runs; the rest printed the kubectl command as text, or invented output. `llama3.2` (the old
+  `target-cluster-agent` model) emitted malformed tool-call JSON as its answer. Check `toolCalls` in the
+  AgentRun's `status.tokenUsage`, never the reply text.
 - **`helm install sympozium` silently drops some of the chart's built-in `SkillPack` resources** (kind: SkillPack, labeled `sympozium.ai/builtin: "true"` — observed: `web-endpoint`, `k8s-ops`, `code-review`, `incident-response`, `llmfit`, `memory`, `sre-observability`, `subagents`) even on a clean install with `--wait` reporting success and `helm get manifest` showing them as part of the release. Other kinds in the same chart (`SympoziumPolicy`, etc.) were not observed to be affected. Symptom: an `Agent` with `skills: [{skillPackRef: web-endpoint}]` gets an `AgentRun` stuck `Failed` with `"no sidecar with requiresServer=true found"` — no `<name>-web-endpoint-server` Deployment ever appears, so `sympozium-lb-setup.sh` has nothing to expose and the AI tab has no serving endpoint to call. Fixed by `06-sympozium/fix-missing-builtin-skillpacks.sh` (auto-run by `install-sympozium.sh` as step `2a/5`): diffs `helm get manifest`'s builtin-labeled SkillPacks against what's actually in-cluster and re-applies whatever is missing; idempotent. After it runs, delete any AgentRuns stuck `Failed` from before the SkillPack existed (`kubectl delete agentrun <name>-web-endpoint -n sympozium-system`) so the controller recreates them — it does not retry a terminal `Failed` run on its own.

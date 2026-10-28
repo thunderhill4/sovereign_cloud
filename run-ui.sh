@@ -79,8 +79,21 @@ export REGISTRY_URL REGISTRY_ALIAS
 # Default switched 2026-09-18 from target-cluster-parallel.yaml (:latest image,
 # still carrying the pre-upgrade k3s v1.31.4 binary per CLAUDE.md) to the warm
 # manifest, which matches the on-demand deploy path's default image.
+# Target control plane (2026-10-21, docs/sub-60s-cluster-strategy.md §12):
+#   hosted (default) — the k3s server is a resident pod on cluster2 (namespace
+#                      target-cp) owning 172.18.255.215; builds boot two agent VMs
+#                      from the :agent image, both nodes Ready in ~9s.
+#   vm               — the legacy VM control plane (target-cluster-warm, ~18s).
+# The two cannot run at once: both claim 172.18.255.215. To switch hosted -> vm,
+# delete the target cluster, then `kubectl delete ns target-cp`.
+export TARGET_CP_MODE="${TARGET_CP_MODE:-hosted}"
+if [[ "$TARGET_CP_MODE" == "vm" ]]; then
+    _default_manifest=03-target-cluster/target-cluster-warm.yaml
+else
+    _default_manifest=03-target-cluster/target-cluster-hosted.yaml
+fi
 export POOL_ENABLED="${POOL_ENABLED:-true}"
-export POOL_STANDBY_MANIFEST="${POOL_STANDBY_MANIFEST:-03-target-cluster/target-cluster-warm.yaml}"
+export POOL_STANDBY_MANIFEST="${POOL_STANDBY_MANIFEST:-$_default_manifest}"
 export POOL_POLL_SECONDS="${POOL_POLL_SECONDS:-5}"
 # On-demand mode (default since 2026-10-13): no target cluster while nobody uses
 # it. The first access builds one (API answering in under 20s) and it is deleted
@@ -94,6 +107,18 @@ export TARGET_FRONTDOOR_ADDR="${TARGET_FRONTDOOR_ADDR:-172.18.0.1:16443}"
 if [[ "$POOL_MODE" == "ondemand" && "$POOL_ENABLED" != "false" ]]; then
     kubectl --context kind-cluster2 apply -f "$SCRIPT_DIR/ui/k8s/target-frontdoor.yaml" >/dev/null \
         || echo "WARNING: could not apply ui/k8s/target-frontdoor.yaml — kubectl via 172.18.255.223 will not work"
+fi
+# Hosted mode: start the resident control plane now, so the target API answers
+# before any wake. Idempotent; the backend re-ensures it before every build.
+# seed-hosted-cp.sh refuses (and this only warns) while a legacy VM-control-plane
+# target-cluster holds the VIP.
+if [[ "$TARGET_CP_MODE" != "vm" ]]; then
+    if ( cd "$SCRIPT_DIR" && ./scripts/seed-hosted-cp.sh >/dev/null \
+         && kubectl --context kind-cluster2 apply -k 03-target-cluster/hosted-cp >/dev/null ); then
+        echo "Hosted control plane: target-cp/k3s-server on 172.18.255.215"
+    else
+        echo "WARNING: hosted control plane not started — see scripts/seed-hosted-cp.sh output above"
+    fi
 fi
 
 cleanup() {
@@ -125,6 +150,7 @@ SECURITY_AGENT_URL="$SECURITY_AGENT_URL" \
 LAYA_URL="$LAYA_URL" \
 LAYA_API_KEY="$LAYA_API_KEY" \
 LAYA_BLOCK_THRESHOLD="$LAYA_BLOCK_THRESHOLD" \
+AI_CHAT_TIMEOUT="${AI_CHAT_TIMEOUT:-5m}" \
 CLAUDE_DIR="$SCRIPT_DIR" \
 go run . &
 BACKEND_PID=$!

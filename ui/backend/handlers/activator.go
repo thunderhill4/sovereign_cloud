@@ -51,6 +51,7 @@ type activator struct {
 	apiUp    func() bool
 	wake     func()
 	touch    func()
+	stopped  func() bool // deleted from the UI: answer, but never wake
 	holdMax  time.Duration
 }
 
@@ -127,6 +128,13 @@ func (a *activator) serveDown(c net.Conn) {
 	// Only a holder of a valid client cert may start a build.
 	if len(tc.ConnectionState().VerifiedChains) == 0 {
 		writeStatus(tc, req, http.StatusUnauthorized, "Unauthorized", "client certificate required", false)
+		return
+	}
+	// No Retry-After: client-go would otherwise retry a cluster that is not
+	// coming back.
+	if a.stopped != nil && a.stopped() {
+		writeStatus(tc, req, http.StatusServiceUnavailable, "ServiceUnavailable",
+			"target-cluster was deleted from the UI; Deploy it again to use it", false)
 		return
 	}
 	a.wake()
@@ -297,12 +305,20 @@ func StartTargetFrontDoor() {
 		log.Printf("front door disabled: %v", err)
 		return
 	}
+	// Hosted control plane: the API always answers (and 401s unauthenticated
+	// /readyz), so "up" is "the target's Nodes are Ready". Otherwise a request on
+	// an idle cluster would be spliced to an empty API and never wake it.
+	up := targetAPIUp
+	if hostedCP() {
+		up = targetUsable
+	}
 	a := &activator{
 		upstream: targetLBIP + ":6443",
 		tlsCfg:   cfg,
-		apiUp:    targetAPIUp,
+		apiUp:    up,
 		wake:     wakeTarget,
 		touch:    touchTarget,
+		stopped:  targetStoppedByUser,
 		holdMax:  60 * time.Second,
 	}
 	// A cluster that predates this mode has a direct kubeconfig published;

@@ -2,6 +2,7 @@ import { Server, SquareTerminal } from 'lucide-react';
 import { ModeToggle } from './ModeToggle';
 import { NamespaceSelector } from '@/components/sre/NamespaceSelector';
 import { cn } from '@/lib/utils';
+import { describeTarget, toneDot, usePoolStatus } from '@/hooks/usePoolStatus';
 import type { AppMode } from '@/lib/types';
 
 interface HeaderProps {
@@ -23,6 +24,8 @@ export function Header({
   terminalOpen,
   onToggleTerminal,
 }: HeaderProps) {
+  const pool = usePoolStatus();
+  const target = describeTarget(pool);
   return (
     <header className="flex h-14 items-center justify-between border-b border-border bg-card px-4">
       <div className="flex items-center gap-3">
@@ -49,9 +52,16 @@ export function Header({
             </button>
           </>
         )}
-        <div className="flex items-center gap-2 rounded-md bg-secondary px-3 py-1.5 text-xs text-muted-foreground">
-          <span className="h-2 w-2 rounded-full bg-green-500" />
+        <div
+          className="flex items-center gap-2 rounded-md bg-secondary px-3 py-1.5 text-xs text-muted-foreground"
+          title={target.detail}
+        >
+          <span className={cn('h-2 w-2 rounded-full', toneDot[target.tone])} />
           target-cluster
+          <span className="text-foreground">{target.label}</span>
+          {pool?.mode === 'ondemand' && (
+            <span className="rounded border border-border px-1 text-[10px] uppercase tracking-wide">on-demand</span>
+          )}
         </div>
       </div>
     </header>

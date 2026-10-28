@@ -32,7 +32,7 @@ K="kubectl --context ${KCTX}"
 
 VER="${SYMPOZIUM_CHART_VERSION:-}"
 if [[ -z "$VER" ]]; then
-    VER="$(helm list -n "$NS" -f '^sympozium$' -o json 2>/dev/null \
+    VER="$(helm --kube-context "$KCTX" list -n "$NS" -f '^sympozium$' -o json 2>/dev/null \
            | sed -n 's/.*"chart":"sympozium-\([^"]*\)".*/\1/p')"
 fi
 [[ -n "$VER" ]] || { echo "ERROR: could not determine the installed chart version." >&2; exit 1; }

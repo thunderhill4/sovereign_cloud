@@ -1,0 +1,10 @@
+# Hosted control plane for target-cluster. Apply with `make hosted-cp`, which
+# first runs scripts/seed-hosted-cp.sh to create the hosted-cp-ca Secret and the
+# target-cluster-kubeconfig Secret.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml

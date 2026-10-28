@@ -1,0 +1,14 @@
+# k3s server data dir: kine/SQLite datastore, leaf certs signed from the warm CAs,
+# and node-password Secrets. It persists across wakes, because the control plane is
+# resident and only the agent VMs come and go. Kind's default StorageClass
+# (local-path) is fine: one replica, one node.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: k3s-server-data
+  namespace: target-cp
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 2Gi

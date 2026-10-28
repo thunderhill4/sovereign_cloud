@@ -1,10 +1,11 @@
-.PHONY: kubevirt-perf capk-patch phase-timings all prereqs metallb capi-init target-cluster target-cluster-lite target-cluster-full target-cluster-parallel target-cluster-preinit target-cluster-lite-preinit target-cluster-full-preinit target-cluster-lite-minimal target-cluster-full-minimal verify clean ui ui-build registry bake-image bake-image-preinit bake-image-minimal-preinit build-containerdisk-preinit build-containerdisk-minimal-preinit demo help registry-fix pre-pull pre-pull-preinit pre-pull-minimal-preinit bake-image-warm build-containerdisk-warm pre-pull-warm ensure-warm-image target-cluster-warm time-to-ready time-to-ready-warm time-to-ready-by-name istio security-agent security-agent-build security-policies security-deploy sympozium-install sympozium-lb sympozium-pack-install sympozium-pack-uninstall sympozium-demo-agents sympozium-warm sympozium-demo sympozium-demo-clean sympozium-fix-node-probe sympozium-fix-llmfit-gpu
+.PHONY: sovctl sovctl-install kubevirt-perf capk-patch phase-timings all prereqs metallb capi-init target-cluster target-cluster-lite target-cluster-full target-cluster-parallel target-cluster-preinit target-cluster-lite-preinit target-cluster-full-preinit target-cluster-lite-minimal target-cluster-full-minimal verify clean ui ui-build registry bake-image bake-image-preinit bake-image-minimal-preinit build-containerdisk-preinit build-containerdisk-minimal-preinit demo help registry-fix pre-pull pre-pull-preinit pre-pull-minimal-preinit bake-image-warm build-containerdisk-warm pre-pull-warm ensure-warm-image target-cluster-warm hosted-cp hosted-cp-verify target-cluster-hosted bake-image-agent build-containerdisk-agent pre-pull-agent ensure-agent-image time-to-ready time-to-ready-warm time-to-ready-by-name istio security-agent security-agent-build security-policies security-deploy sympozium-install sympozium-lb sympozium-pack-install sympozium-pack-uninstall sympozium-demo-agents sympozium-warm sympozium-models sympozium-demo sympozium-demo-clean sympozium-fix-node-probe sympozium-fix-llmfit-gpu
 
 REGISTRY_URL := 172.18.0.2:5000
 CONTAINER_IMAGE := $(REGISTRY_URL)/ubuntu-noble-k3s:latest
 PREINIT_IMAGE := $(REGISTRY_URL)/ubuntu-noble-k3s:preinit
 MINIMAL_PREINIT_IMAGE := $(REGISTRY_URL)/ubuntu-minimal-k3s:preinit
 WARM_IMAGE := $(REGISTRY_URL)/ubuntu-noble-k3s:warm
+AGENT_IMAGE := $(REGISTRY_URL)/ubuntu-noble-k3s:agent
 KIND_NODES := $(shell docker ps --filter "name=cluster2" --format '{{.Names}}')
 
 all: prereqs metallb capi-init target-cluster
@@ -14,8 +15,11 @@ help:
 	@echo ""
 	@echo "Cluster Lifecycle:"
 	@echo "  make all                  - Full setup (prereqs + metallb + capi + cluster)"
-	@echo "  make target-cluster               - Deploy target cluster (WARM fast-path, parallel boot; measured 33.7s median, both nodes)"
+	@echo "  make target-cluster               - Deploy target cluster (HOSTED control plane + 2 agent VMs; ~9s both nodes Ready)"
 	@echo "  make target-cluster-warm          - Warm fast-path explicitly (seeds CA/token, :warm image)"
+	@echo "  make hosted-cp                    - Resident k3s control-plane pod on cluster2 (172.18.255.215)"
+	@echo "  make target-cluster-hosted        - 2 agent VMs joining the hosted control plane (the default)"
+	@echo "  make hosted-cp-verify             - Pass/fail checks for the hosted control plane + its nodes"
 	@echo "  make target-cluster-lite          - Legacy lite (2 CPU · 4Gi, :latest image)"
 	@echo "  make target-cluster-full          - Legacy full (4 CPU · 8/6Gi, :latest image)"
 	@echo "  make target-cluster-parallel      - Full profile, worker boots in parallel (~61s, demo)"
@@ -67,6 +71,8 @@ help:
 	@echo "Web UI:"
 	@echo "  make ui             - Run the web UI (frontend + backend)"
 	@echo "  make ui-build       - Build the UI for production"
+	@echo "  make sovctl         - Build the sovctl CLI to bin/sovctl (dashboard from the terminal)"
+	@echo "  make sovctl-install - Build it and link it into ~/.local/bin"
 	@echo ""
 	@echo "Security Agent:"
 	@echo "  make security-agent       - Run security agent in development mode (port 8082)"
@@ -83,6 +89,7 @@ help:
 	@echo "  make sympozium-pack-uninstall - Remove Phase-0 core bundle"
 	@echo "  make sympozium-demo-agents - Apply cost-analyzer + incident-responder + patch LBs"
 	@echo "  make sympozium-warm        - Keep Ollama llama3.2 resident (fixes cold-start)"
+	@echo "  make sympozium-models      - Create the larger-context Ollama models the agents use"
 	@echo "  make sympozium-demo        - Run end-to-end Sympozium demo (agent fixes a stuck VM)"
 	@echo "  make sympozium-demo-clean  - Restore any VMs the demo stopped + delete demo agents"
 	@echo ""
@@ -96,10 +103,12 @@ metallb:
 capi-init:
 	bash 02-capi-init/init-management-cluster.sh
 
-# Default: WARM fast-path (parallel worker boot on the pre-baked :warm golden
-# image; seeds fixed CA/token secrets first). Targets time-to-ready <40s.
-# Legacy sequential/parallel variants remain available below.
-target-cluster: target-cluster-warm
+# Default (2026-10-21): HOSTED control plane — resident k3s server pod on
+# cluster2 + 2 agent VMs on the :agent image, both nodes Ready in ~9s
+# (docs/sub-60s-cluster-strategy.md §12). The VM control plane (target-cluster-warm,
+# ~18s) and the legacy variants below remain; they cannot run while the hosted
+# control plane holds 172.18.255.215 (kubectl delete ns target-cp first).
+target-cluster: target-cluster-hosted
 
 # Legacy: static YAML, :latest containerDisk. Kept for rollback during Phase
 # 1+2 verification. Flip to :preinit variants once Phase 1 gate passes.
@@ -249,6 +258,64 @@ target-cluster-warm: registry-fix ensure-warm-image
 	./scripts/seed-cluster-secrets.sh
 	kubectl apply -f 03-target-cluster/target-cluster-warm.yaml
 
+# Hosted control plane (docs/sub-60s-cluster-strategy.md §12): the k3s server
+# runs as a resident pod on cluster2 and owns 172.18.255.215, so it cannot run
+# alongside target-cluster-warm (seed-hosted-cp.sh refuses while a legacy
+# KThreesControlPlane exists). Both VMs of target-cluster-hosted are agents.
+hosted-cp:
+	./scripts/seed-hosted-cp.sh
+	kubectl apply -k 03-target-cluster/hosted-cp
+	kubectl -n target-cp rollout status deploy/k3s-server --timeout=180s
+
+target-cluster-hosted: registry-fix ensure-agent-image hosted-cp
+	kubectl apply -f 03-target-cluster/target-cluster-hosted.yaml
+
+# Agent-only image for the hosted control plane (BAKE_MODE=agent): no server
+# state, cloud-init disabled, k3s-agent starts at network-online from baked
+# config. Delete the ubuntu-noble-k3s-agent DV before a rebake, or the bake runs
+# on top of the previous one.
+bake-image-agent:
+	BAKE_MODE=agent \
+	DV_TARGET=ubuntu-noble-k3s-agent \
+	VM_NAME=ubuntu-bake-vm-agent \
+	TARGET_IMAGE=localhost:5000/ubuntu-noble-k3s:agent \
+	./bake-golden-image.sh
+
+# Uncompressed qcow2 (QCOW2_COMPRESS=0): 3.4GB instead of 1.5GB, but guest
+# reads skip zlib in qemu. Measured 11.4s -> 10.6s both nodes Ready (§12).
+build-containerdisk-agent:
+	QCOW2_COMPRESS=0 \
+	DV_SOURCE=ubuntu-noble-k3s-agent \
+	IMAGE_NAME=localhost:5000/ubuntu-noble-k3s:agent \
+	HELPER_POD=disk-extractor-agent \
+	WORK_DIR=/tmp/containerdisk-build-agent \
+	./build-containerdisk.sh
+
+pre-pull-agent: registry-fix
+	@echo "Pre-pulling $(AGENT_IMAGE) on Kind nodes..."
+	@for node in $(KIND_NODES); do \
+		echo "  Pulling on $$node..."; \
+		docker exec $$node crictl pull $(AGENT_IMAGE) 2>/dev/null || \
+		docker exec $$node ctr -n k8s.io images pull --plain-http $(AGENT_IMAGE) 2>/dev/null || \
+		echo "    (pull command not available on $$node)"; \
+	done
+	@echo "Done."
+
+ensure-agent-image: registry-fix
+	@node=$(firstword $(KIND_NODES)); \
+	if docker exec $$node crictl images 2>/dev/null | grep -q 'ubuntu-noble-k3s.*agent'; then \
+		echo "==> agent image already present on $$node"; \
+	else \
+		$(MAKE) --no-print-directory pre-pull-agent; \
+		if ! docker exec $$node crictl images 2>/dev/null | grep -q 'ubuntu-noble-k3s.*agent'; then \
+			echo "==> not in registry either — baking agent image (~4 min)..."; \
+			$(MAKE) --no-print-directory bake-image-agent build-containerdisk-agent pre-pull-agent; \
+		fi; \
+	fi
+
+hosted-cp-verify:
+	./scripts/verify-hosted-cp.sh
+
 time-to-ready-by-name:
 	./scripts/time-to-ready-by-name.sh $(MANIFEST) $(if $(RUNS),--runs $(RUNS),)
 
@@ -290,6 +357,16 @@ ui-build:
 	cd ui/frontend && npm install && npm run build
 	cd ui/backend && go build -o ../dist/backend .
 	@echo "UI built to ui/dist/"
+
+# sovctl: the dashboard's command-line twin; talks to the backend on :8080.
+sovctl:
+	cd ui/backend && go build -ldflags "-X main.version=$$(git -C ../.. describe --always --dirty 2>/dev/null || echo dev)" -o ../../bin/sovctl ./cmd/sovctl
+	@echo "Built bin/sovctl — try: bin/sovctl status"
+
+sovctl-install: sovctl
+	mkdir -p $(HOME)/.local/bin
+	ln -sf $(CURDIR)/bin/sovctl $(HOME)/.local/bin/sovctl
+	@echo "Linked ~/.local/bin/sovctl. Completion: source <(sovctl completion zsh)"
 
 # ── Security Agent ────────────────────────────────────────────
 
@@ -335,6 +412,9 @@ sympozium-pack-uninstall: ## Remove Phase-0 core bundle
 
 sympozium-warm: ## Manual warm fallback (canonical path is the ollama-warm SympoziumSchedule in the core bundle)
 	bash 06-sympozium/ollama-warm.sh
+
+sympozium-models: ## Create the Ollama model variants the agents name (larger num_ctx; see ollama-models.sh)
+	bash 06-sympozium/ollama-models.sh
 
 sympozium-demo: ## Run end-to-end Sympozium demo (agent fixes a stuck VM)
 	bash 06-sympozium/demo-sympozium.sh
