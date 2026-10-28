@@ -296,6 +296,21 @@ func renderTemplate(path string, subs map[string]string) (string, error) {
 	return out, nil
 }
 
+// runShellQuiet is runShell without the deploy log: for background work that
+// may run while no deploy is in flight. The error carries the output's last line.
+func runShellQuiet(script string) error {
+	cmd := exec.Command("bash", "-c", script)
+	cmd.Env = os.Environ()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+		if last := strings.TrimSpace(lines[len(lines)-1]); last != "" {
+			return fmt.Errorf("%w: %s", err, last)
+		}
+	}
+	return err
+}
+
 // applyStdin pipes the given YAML to `kubectl apply -f -` and streams
 // stdout/stderr through the deploy log.
 func applyStdin(yaml string) error {
@@ -559,6 +574,7 @@ func runDeployment(profile, image string) {
 	deploy.addLog("step", "━━ Step 3/6: Ensure CAPI Providers are Ready ━━")
 	deploy.addLog("info", "CAPI orchestrates VM creation (CAPK) and k3s bootstrap.")
 
+	ensureRegistryPulls(deploy.addLog)
 	capiReady := shellCheck(`kubectl get deployment capi-controller-manager -n capi-system 2>/dev/null`) &&
 		shellCheck(`kubectl get deployment capk-controller-manager -n capk-system 2>/dev/null`)
 

@@ -515,10 +515,16 @@ answer: 15.3 / 15.3 / 15.7s** (both nodes Ready ~20.5s). Idle delete takes ~14s.
   the env value), and does not reset the idle clock, so a TTL below the current idle time deletes on the next
   tick. The header badge shows live state (Up / Waking / Deleting / Asleep / Stopped) from `pool-status` on every page.
 - **A teardown needs the CAPK controller.** If it is down (e.g. `ImagePullBackOff` on
-  `capk-manager:*-kubeui2` after a host restart moved the registry IP: fix with `make registry-fix`), the
+  `capk-manager:*-kubeui2` after a host restart moved the registry IP: fix with `make registry-fix`; the backend now does this itself, see below), the
   Cluster sits in `Deleting` forever while its VMs and Nodes stay up. `pool-status` reports `deleting` +
   `deletingSeconds` (UI: "Deleting (stuck)" after 3 min) and the pool controller waits rather than
   rebuild-looping (before 2026-10-23 it re-ran a 120s delete + apply every tick, which also blocked idle deletes).
+- **Registry self-heal** (`handlers/registry_heal.go`, 2026-10-28): every 30s, and right before each
+  target-cluster apply, the backend looks for pods stuck in `ImagePullBackOff`/`ErrImagePull` on an image
+  from `REGISTRY_ALIAS`. If it finds any, it re-runs `scripts/fix-registry-hosts.sh` and deletes the stuck
+  ReplicaSet-owned pods (virt-launcher pods are left to kubelet). At most once per 2 min. It needs `docker`,
+  so it works only when the backend runs on the host (`run-ui.sh`), not in-cluster. Failed `kubectl` calls
+  now put their last stderr line in `pool-status.lastError`, which survives retries until a build succeeds.
 - Only clusters labeled `pool.local/state` are reaped; an unlabeled one is left alone.
   The idle clock is in memory and restarts with the backend.
 - The kubeconfig survives a delete in this mode (it is what the next access wakes with).

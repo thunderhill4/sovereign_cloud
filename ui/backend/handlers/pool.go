@@ -470,6 +470,7 @@ func buildStandby(claimAfter bool, predelete bool) {
 			return
 		}
 	}
+	ensureRegistryPulls(deploy.addLog)
 	if err := runShell("kubectl apply -f " + manifestPath); err != nil {
 		pool.setBuildState("none", "apply failed: "+err.Error())
 		claimPending.Store(false)

@@ -55,6 +55,8 @@ func main() {
 	handlers.LoadPoolSettings()
 	// Pool controller: keep one warm standby cluster pre-built.
 	go handlers.RunPoolController(context.Background())
+	// Registry self-heal: re-map the registry alias after its IP drifts.
+	go handlers.RunRegistryHealer(context.Background())
 	// On-demand mode only: wake-on-access front door for the target API.
 	go handlers.StartTargetFrontDoor()
 
