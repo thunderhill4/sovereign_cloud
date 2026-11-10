@@ -4,6 +4,34 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UI_DIR="$SCRIPT_DIR/ui"
 
+# Start any stopped Kind clusters (e.g. after scripts/stop-kind-clusters.sh or a
+# host reboot) and wait for their API servers. Export START_KIND=0 to skip.
+# Only restarts existing node containers; it never creates a cluster.
+if [[ "${START_KIND:-1}" != "0" ]]; then
+    mapfile -t _kind_stopped < <(docker ps -aq --filter label=io.x-k8s.kind.cluster --filter status=exited --filter status=created 2>/dev/null || true)
+    if [[ ${#_kind_stopped[@]} -gt 0 ]]; then
+        echo "Starting ${#_kind_stopped[@]} stopped Kind node container(s)..."
+        docker start "${_kind_stopped[@]}" >/dev/null
+    fi
+    mapfile -t _kind_clusters < <(kind get clusters 2>/dev/null | grep -v '^No kind clusters' || true)
+    for _c in "${_kind_clusters[@]}"; do
+        _ready=""
+        for _ in $(seq 1 60); do
+            if kubectl --context "kind-${_c}" get --raw /readyz >/dev/null 2>&1; then _ready=1; break; fi
+            sleep 2
+        done
+        if [[ -n "$_ready" ]]; then
+            echo "Kind cluster ${_c}: API ready"
+        else
+            echo "WARNING: Kind cluster ${_c} API not ready after 120s"
+        fi
+    done
+    # A restart can move the registry's kind-network IP; re-sync containerd's mapping.
+    if [[ ${#_kind_stopped[@]} -gt 0 && -x "$SCRIPT_DIR/scripts/fix-registry-hosts.sh" ]]; then
+        "$SCRIPT_DIR/scripts/fix-registry-hosts.sh" >/dev/null 2>&1 || echo "WARNING: fix-registry-hosts.sh failed; run 'make registry-fix'"
+    fi
+fi
+
 SYMPOZIUM_NAMESPACE="${SYMPOZIUM_NAMESPACE:-sympozium-system}"
 SYMPOZIUM_DEFAULT_AGENT="${SYMPOZIUM_DEFAULT_AGENT:-cluster2-agent}"
 
