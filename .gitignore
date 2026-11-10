@@ -5,3 +5,7 @@ ui/dist/
 07-istio-advanced/.certs/
 .cache/
 bin/
+
+# Remotion explainer video project
+video/*/node_modules/
+video/*/out/

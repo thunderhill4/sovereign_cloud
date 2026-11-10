@@ -449,6 +449,11 @@ host. The demo re-asks a question only when the reply is *structurally* broken (
 or a raw tool call leaked as text); a well-formed but unhelpful answer is kept, so the
 video shows the agent's real hit rate rather than a curated one.
 
+**Explainer:** `docs/demo/sympozium-agents-explainer.mp4` is a separate 5-minute motion-graphics
+overview of all three agents (platform, Agent CR anatomy, one question's path, guardrails, reach),
+silent with on-screen captions. Source is a Remotion project in `video/sympozium-explainer/`
+(`npm run studio` to preview, `make motion-video` to re-render; uses the host's Chrome).
+
 **Not in kubeui's agent dropdown.** `HandleListAgents` still queries the removed
 `SympoziumInstance` CRD and falls back to listing only `SYMPOZIUM_DEFAULT_AGENT`, so
 new `Agent` CRs never appear there. Reachable directly on `.222` or via

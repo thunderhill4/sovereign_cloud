@@ -1,0 +1,22 @@
+{
+  "name": "sympozium-explainer",
+  "private": true,
+  "version": "1.0.0",
+  "description": "5-minute motion-graphics explainer of the Sympozium agents (Remotion)",
+  "scripts": {
+    "studio": "remotion studio src/index.ts",
+    "render": "remotion render src/index.ts SympoziumExplainer ../../docs/demo/sympozium-agents-explainer.mp4 --codec h264 --concurrency 12",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.539",
+    "@remotion/transitions": "4.0.539",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "remotion": "4.0.539"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "typescript": "7.0.2"
+  }
+}
