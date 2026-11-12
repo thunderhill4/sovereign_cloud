@@ -29,6 +29,12 @@ spec:
   subagentPolicy:
     maxConcurrent: 5
     maxDepth: 3
+  # 0.12.0+: k8s-ops asks for secrets and pods/exec RBAC. Off by default now;
+  # without this the cluster2-agent and mesh-sre-agent kubectl sidecars lose
+  # secret reads and exec. Trade-off: an agent driving k8s-ops can read model
+  # keys in sympozium-system. Remove on pre-0.12 clusters (the field is unknown there).
+  skillPolicy:
+    allowSecretAccess: true
   toolGating:
     defaultAction: allow
     rules:

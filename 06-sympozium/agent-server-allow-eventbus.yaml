@@ -1,0 +1,35 @@
+---
+# Serving agents' web-proxy pods (`<agent>-web-endpoint-server`) are labeled
+# sympozium.ai/component=agent-server, but the chart's NATS egress allowance
+# (`sympozium-web-proxy-allow-ingress`, 0.10.87) selects
+# sympozium.ai/component=web-proxy, so it never applies to them. The Egress
+# policies that DO select them (`sympozium-allow-otel` from the chart and
+# `sympozium-allow-ollama` from agent-egress-ollama.yaml, both on
+# app.kubernetes.io/part-of=sympozium) allow DNS, Ollama, the K8s API and OTel,
+# not NATS. With kindnet enforcing, the web-proxy's NATS dial is dropped; it
+# blocks forever in JetStream ensureStream before binding :8080, the liveness
+# probe kills it (exit 2, zero log output), and every chat to cluster2-agent,
+# target-cluster-agent and mesh-sre-agent fails with "no route to host".
+#
+# Diagnosed 2026-10-23 from a SIGQUIT goroutine dump (main.go:63 ->
+# eventbus.newNATSEventBus -> ensureStream -> requestWithContext) plus NATS
+# /connz showing no connection from any web-proxy pod.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sympozium-agent-server-allow-eventbus
+  namespace: sympozium-system
+spec:
+  podSelector:
+    matchLabels:
+      sympozium.ai/component: agent-server
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/component: nats
+    ports:
+    - port: 4222
+      protocol: TCP

@@ -36,7 +36,29 @@ type CrossClusterState struct {
 	Timestamp      string        `json:"timestamp"`
 }
 
-// targetKubeconfigPath resolves the target-cluster kubeconfig path.
+// backendTargetKubeconfig is the kubeconfig for the backend's own reads of the
+// target (status, topology, probes), or "" if there is none. It never returns
+// the front-door copy: in on-demand mode the repo-root kubeconfig points at
+// 172.18.255.223, so a status poll through it counted as use and woke a
+// cluster the idle timer had just deleted.
+func backendTargetKubeconfig() string {
+	return pickBackendKubeconfig("/tmp/"+targetClusterName+"-kubeconfig",
+		filepath.Join(claudeDir(), targetClusterName+"-kubeconfig"))
+}
+
+func pickBackendKubeconfig(direct, published string) string {
+	if _, err := os.Stat(direct); err == nil {
+		return direct
+	}
+	raw, err := os.ReadFile(published)
+	if err != nil || strings.Contains(string(raw), targetFrontDoorIP) {
+		return ""
+	}
+	return published
+}
+
+// targetKubeconfigPath resolves the target-cluster kubeconfig users act
+// through (the front door in on-demand mode, so their actions count as use).
 // Looks in CLAUDE_DIR first (set by run-ui.sh), then /tmp.
 func targetKubeconfigPath() string {
 	if dir := os.Getenv("CLAUDE_DIR"); dir != "" {
@@ -100,7 +122,8 @@ func HandleCrossClusterProbe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tkc := targetKubeconfigPath()
+	// A probe is not use: never reach the target through the front door.
+	tkc := backendTargetKubeconfig()
 
 	type spec struct {
 		ctxFlag   string
@@ -138,6 +161,11 @@ func HandleCrossClusterProbe(w http.ResponseWriter, r *http.Request) {
 		wg.Add(1)
 		go func(idx int, sp spec) {
 			defer wg.Done()
+			if sp.ctxFlag == "--kubeconfig=" {
+				probes[idx] = ProbeResult{ID: sp.id, From: sp.from, To: sp.to, URL: sp.url,
+					Error: "target cluster is not running", Timestamp: time.Now().Format(time.RFC3339), Direction: sp.direction}
+				return
+			}
 			probes[idx] = runProbe(sp.ctxFlag, sp.namespace, sp.url, sp.id, sp.from, sp.to, sp.direction)
 		}(i, s)
 	}

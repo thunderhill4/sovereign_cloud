@@ -49,8 +49,14 @@ func main() {
 		log.Println("Kubernetes client initialized successfully")
 	}
 
+	// A cluster deleted from the UI stays down across restarts.
+	handlers.LoadTargetStopped()
+	// An idle TTL set from the UI survives restarts too.
+	handlers.LoadPoolSettings()
 	// Pool controller: keep one warm standby cluster pre-built.
 	go handlers.RunPoolController(context.Background())
+	// Registry self-heal: re-map the registry alias after its IP drifts.
+	go handlers.RunRegistryHealer(context.Background())
 	// On-demand mode only: wake-on-access front door for the target API.
 	go handlers.StartTargetFrontDoor()
 
@@ -65,6 +71,8 @@ func main() {
 	mux.HandleFunc("/api/v1/cluster/delete", handlers.HandleDeleteClusterStream)
 	mux.HandleFunc("/api/v1/cluster/target-status", handlers.HandleTargetClusterStatus)
 	mux.HandleFunc("/api/v1/cluster/pool-status", handlers.HandlePoolStatus)
+	mux.HandleFunc("/api/v1/cluster/pool-settings", handlers.HandlePoolSettings)
+	mux.HandleFunc("/api/v1/config", handlers.HandleConfig)
 	mux.HandleFunc("/api/v1/cluster/target-delete", handlers.HandleDeleteCluster)
 	mux.HandleFunc("/api/v1/cluster/istio", handlers.HandleIstioInstall)
 

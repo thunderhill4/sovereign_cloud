@@ -48,6 +48,18 @@ export const api = {
   },
   getRegistryImages: () => fetchJSON<RegistryImage[]>(`${BASE}/registry/images`),
   getPoolStatus: () => fetchJSON<PoolStatus>(`${BASE}/cluster/pool-status`),
+  setPoolSettings: async (idleTTLSeconds: number): Promise<PoolStatus> => {
+    const res = await fetch(`${BASE}/cluster/pool-settings`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idleTTLSeconds }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      throw new Error(body?.error || `API error: ${res.status}`);
+    }
+    return res.json();
+  },
   getRegistryConfig: () => fetchJSON<RegistryConfig>(`${BASE}/registry/config`),
   deleteRegistryImage: async (name: string, tag: string) => {
     const res = await fetch(`${BASE}/registry/images/${name}:${tag}`, { method: 'DELETE' });
@@ -79,7 +91,7 @@ export const api = {
   },
   deployCluster: async function* (
     profile: 'lite' | 'full' = 'full',
-    image: 'warm' | 'noble' | 'minimal' = 'warm',
+    image: 'hosted' | 'warm' | 'noble' | 'minimal' = 'hosted',
   ): AsyncGenerator<DeployLogEntry> {
     const res = await fetch(`${BASE}/cluster/deploy?profile=${profile}&image=${image}`, { method: 'POST' });
     if (!res.ok) throw new Error(`Deploy error: ${res.status}`);

@@ -1,0 +1,222 @@
+# GENERATED from target-cluster-hosted.tmpl.yaml by:
+#   PROFILE=full IMAGE_VARIANT=hosted ./scripts/render-cluster.sh
+# Edit the template, then regenerate. Requires 'make hosted-cp' first.
+---
+# Agents-only target cluster for the HOSTED control plane. Both KubeVirt VMs are
+# k3s agents. The k3s server is the resident pod in 03-target-cluster/hosted-cp/,
+# serving 172.18.255.215, so nothing has to boot before the API exists and
+# bring-up is VM boot plus agent join. Design: docs/sub-60s-cluster-strategy.md §12.
+#
+# Rendered by scripts/render-cluster.sh (IMAGE_VARIANT=hosted).
+#
+# Placeholders: target-cluster 172.18.0.2:5000/ubuntu-noble-k3s:agent 172.18.255.215 4 6Gi
+#
+# REQUIRED BEFORE APPLY (`make hosted-cp` does both):
+#   1. scripts/seed-hosted-cp.sh — creates <cluster>-kubeconfig signed by the warm
+#      client CA. Without it, CAPI generates one from the server CA, which k3s
+#      rejects, and Machines never get a NodeRef.
+#   2. kubectl apply -k 03-target-cluster/hosted-cp — the server pod and the
+#      LoadBalancer Service on 172.18.255.215.
+#
+# How CAPI copes without a control plane object:
+#   - Cluster has no controlPlaneRef. That is valid when infrastructureRef is set.
+#   - controlPlaneEndpoint is set here AND on the KubevirtCluster. CAPI copies it
+#     from the infra object only when unset. CAPK v0.11.2, with
+#     spec.controlPlaneEndpoint.host set, uses it and marks the KubevirtCluster
+#     ready without consulting its Service. It still creates a ClusterIP Service
+#     for the control plane, which selects nothing here and is harmless. There is
+#     deliberately NO controlPlaneServiceTemplate / MetalLB annotation: the hosted
+#     Service owns the VIP.
+#   - Do NOT add cluster.x-k8s.io/managed-by to the KubevirtCluster. CAPK then
+#     skips it entirely, never sets ready, and VMs are never created.
+#   - Workers use a static bootstrap Secret (dataSecretName), so nothing waits
+#     on a control-plane-initialized condition.
+#   - NodeRef: CAPK patches spec.providerID onto the workload Node whose name is
+#     the KubevirtMachine (= VM) name, and CAPI matches Machines by providerID.
+#     So the agent's node name must be the VM hostname, which it is by default.
+#   - Node objects are NOT deleted with the Cluster: CAPI skips workload Node
+#     deletion when the Cluster is being deleted and when there are no
+#     control-plane Machines. The resident server keeps them, so whoever deletes
+#     the Cluster must also delete its Nodes (the backend's idle delete does).
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Cluster
+metadata:
+  name: target-cluster
+  namespace: default
+spec:
+  clusterNetwork:
+    pods:
+      cidrBlocks:
+        - 10.42.0.0/16
+    services:
+      cidrBlocks:
+        - 10.43.0.0/16
+  controlPlaneEndpoint:
+    host: 172.18.255.215
+    port: 6443
+  infrastructureRef:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+    kind: KubevirtCluster
+    name: target-cluster
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+kind: KubevirtCluster
+metadata:
+  name: target-cluster
+  namespace: default
+spec:
+  controlPlaneEndpoint:
+    host: 172.18.255.215
+    port: 6443
+---
+# Static agent bootstrap, shared by both VMs. Embeds the fixed WARM token. With
+# the control plane resident, the readyz gate below passes on its first probe.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: target-cluster-workers-bootstrap
+  namespace: default
+type: cluster.x-k8s.io/secret
+stringData:
+  value: |
+    #cloud-config
+
+    write_files:
+    -   path: /usr/local/sbin/pod-subnet-via-gateway.sh
+        owner: root:root
+        permissions: '0755'
+        content: |
+          #!/bin/sh
+          # pod-subnet-via-gateway.sh — make the other target-cluster VM reachable.
+          #
+          # KubeVirt bridge binding hands the guest its launcher pod's address WITH the
+          # Kind node's pod prefix (e.g. 10.244.0.211/24), so the guest treats every other
+          # pod on that node — including the other target-cluster VM — as on-link and ARPs
+          # for it. kindnet routes pods at L3 (point-to-point veths, no proxy ARP), so that
+          # ARP never resolves: VM<->VM was 100% loss in both directions, which broke
+          # flannel VXLAN and every cross-node pod flow (DNS to a CoreDNS on the other
+          # node, metrics-server scraping the worker). Routing only ONE side via the
+          # gateway is not enough — the reply still ARPs — so every VM runs this.
+          #
+          # Adds the two half-prefixes of each on-link subnet via the default gateway;
+          # being more specific, they win over the kernel's connected /24, which is left
+          # in place (DHCP owns it). The gateway itself keeps its DHCP host route.
+          # Computed from the live route table, not hardcoded: the prefix depends on which
+          # Kind node the VM lands on. Idempotent (ip route replace).
+          set -eu
+          dev=$(ip -4 route show default | awk '{print $5; exit}')
+          gw=$(ip -4 route show default | awk '{print $3; exit}')
+          [ -n "$dev" ] && [ -n "$gw" ] || exit 0
+          ip -4 route show dev "$dev" proto kernel scope link | awk -v d="$dev" -v g="$gw" '
+            { split($1, a, "/"); if (a[2] >= 31) next
+              p = a[2] + 1; split(a[1], o, ".")
+              n = ((o[1] * 256 + o[2]) * 256 + o[3]) * 256 + o[4]; h = 2 ^ (32 - p)
+              for (i = 0; i < 2; i++) { m = n + i * h
+                printf "ip route replace %d.%d.%d.%d/%d via %s dev %s\n",
+                  int(m / 16777216) % 256, int(m / 65536) % 256, int(m / 256) % 256, m % 256, p, g, d } }' | sh
+    -   path: /etc/rancher/k3s/config.yaml
+        owner: root:root
+        permissions: '0640'
+        # No `kubelet-arg: cloud-provider=external`: the CP runs with
+        # disable-cloud-controller and no CCM, so nothing ever cleared the
+        # node.cloudprovider.kubernetes.io/uninitialized taint that flag adds.
+        # The worker went Ready but was NoSchedule, and k3s's network-policy
+        # controller waited 15 min on the taint, then crash-looped the agent.
+        content: |
+          server: https://172.18.255.215:6443
+          token: f00dcafef00dcafef00dcafef00dcafe
+
+    runcmd:
+      # VM<->VM reachability fix (see /usr/local/sbin/pod-subnet-via-gateway.sh).
+      - /usr/local/sbin/pod-subnet-via-gateway.sh
+      - "mkdir -p /home/ubuntu/.ssh && echo 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCoeg4clbqLvjstCxtDiDm2hJymy5EeT75HsTMBguKHKPAWcYJDqhakiFF/cxhBoDTLOv6OpfDzCeRoxy0BLFJjQdVNwe7tDl51w+lGG+UR48xATIEEfGxyw8wCjZvML5BnVwdDGyQKFJijZqTlf51hY1FS9x7jg4pVGgNPhf815JHTRsEmzVFgAFK+C5YVl0EYCfII9qpDR7EPECoZngZ5SaMTHLYOVxYBnqrPovuzHD04iemnIuDQKLy4hBYzFMygKkbiKNOYUsuoSsubhtYCtj5KzmV+DpSSIG9YCPC53mjxJ7QiS5/QV9aBEM/0qfVb0aXGhQdjlQ1NoGjeNAMDYsRKDoFNESwYhS39AnXr/ke9nk+4kS0SPYIGqsOMrffJ2e4qzuHOsVjzhCe6rsEwoUufmgzseE+RPVFNxu948cBG6haJde6uqMXe2eq1tKvczYCS9sN8bM8Pb/SmEJDFy7S5I4oaZvsxzotwEEEmgZ+cP92sBZeZefY8LTUmfB0= mahipal' > /home/ubuntu/.ssh/authorized_keys && chown -R ubuntu:ubuntu /home/ubuntu/.ssh && chmod 700 /home/ubuntu/.ssh && chmod 600 /home/ubuntu/.ssh/authorized_keys"
+      # `agent` MUST be positional: the baked /opt/install.sh parses only
+      # positional args and ignores INSTALL_K3S_EXEC, so without it the worker
+      # starts the k3s SERVER unit, which fails ~0.8s later and — because
+      # install.sh runs under `set -e` — aborts the script before it can write
+      # the bootstrap-success sentinel. The env var is kept for the legacy
+      # KThrees-generated path; the positional arg is what actually takes effect.
+      # Start the agent only once the CP supervisor can serve agent config.
+      # k3s's agent-config loop retries on wait.JitterUntil(5s, jitter 1.0) — a
+      # random 5-10s — so a first request that lands even 0.3s early (measured:
+      # 503 at 10.25s, CP API up at 10.52s) wastes 5-10s. On k3s v1.37 the agent
+      # starts containerd only AFTER it has its config, so waiting here costs
+      # nothing (unlike v1.31 — "dead end 3" in docs/sub-60s-cluster-strategy.md).
+      # Probe the supervisor's own /v1-k3s/readyz (token auth, no side effects):
+      # 503 until Runtime.Core is set — the same condition that 503s the agent's
+      # serving-kubelet.crt request. (/v1-k3s/config is NOT gated on it: it answered
+      # 200 ~2s before the API was up.) Bounded at ~5 min, then start anyway.
+      - "for i in $(seq 1 1500); do [ \"$(curl -sk -o /dev/null -w '%{http_code}' --max-time 1 -u node:f00dcafef00dcafef00dcafef00dcafe https://172.18.255.215:6443/v1-k3s/readyz)\" = 200 ] && break; sleep 0.2; done"
+      - INSTALL_K3S_SKIP_DOWNLOAD=true INSTALL_K3S_EXEC='agent' sh /opt/install.sh agent && mkdir -p /run/cluster-api && echo success > /run/cluster-api/bootstrap-success.complete
+      - "systemctl daemon-reload && systemctl enable k3s-agent && systemctl start k3s-agent"
+---
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: MachineDeployment
+metadata:
+  name: target-cluster-workers
+  namespace: default
+  annotations:
+    # Preflight checks are already a no-op without a controlPlaneRef; kept so a
+    # future controlPlaneRef can't silently serialize the VMs again.
+    machineset.cluster.x-k8s.io/skip-preflight-checks: All
+spec:
+  clusterName: target-cluster
+  replicas: 2
+  selector:
+    matchLabels: {}
+  template:
+    spec:
+      clusterName: target-cluster
+      version: v1.37.0+k3s1
+      bootstrap:
+        dataSecretName: target-cluster-workers-bootstrap
+      infrastructureRef:
+        apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+        kind: KubevirtMachineTemplate
+        name: target-cluster-workers
+        namespace: default
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+kind: KubevirtMachineTemplate
+metadata:
+  name: target-cluster-workers
+  namespace: default
+spec:
+  template:
+    spec:
+      virtualMachineBootstrapCheck:
+        checkStrategy: none
+      virtualMachineTemplate:
+        metadata:
+          namespace: default
+        spec:
+          runStrategy: Always
+          template:
+            spec:
+              domain:
+                cpu:
+                  cores: 4
+                memory:
+                  guest: 6Gi
+                ioThreadsPolicy: shared
+                devices:
+                  # No guest-console-log sidecar: it is the launcher's first init
+                  # container, and with it reading the serial port, firmware/GRUB
+                  # serial output slowed every boot. Measured 9.7s -> 8.5s both
+                  # nodes Ready (docs §12, Phase 3). `virtctl console` still works;
+                  # boot diagnostics come from the guest journal instead.
+                  logSerialConsole: false
+                  disks:
+                    - disk:
+                        bus: virtio
+                      name: systemdisk
+                  interfaces:
+                    - bridge: {}
+                      name: default
+              networks:
+                - name: default
+                  pod: {}
+              volumes:
+                - containerDisk:
+                    image: 172.18.0.2:5000/ubuntu-noble-k3s:agent
+                  name: systemdisk

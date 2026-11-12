@@ -47,7 +47,7 @@ spec:
         enabled: false
   authRefs:
     - provider: ollama
-      secret: llm-credentials
+      secret: cost-analyzer-llm-credentials
   skills:
     - skillPackRef: k8s-ops
     - skillPackRef: web-endpoint

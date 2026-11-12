@@ -4,7 +4,8 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { api } from '@/lib/api';
-import type { DeployLogEntry, PoolStatus, TargetClusterStatus } from '@/lib/types';
+import type { DeployLogEntry, TargetClusterStatus } from '@/lib/types';
+import { TargetStatusBanner } from './TargetStatusBanner';
 import {
   Play,
   Trash2,
@@ -91,9 +92,7 @@ export function ClusterManager() {
   const [activeOp, setActiveOp] = useState<'deploy' | 'delete' | 'istio' | null>(null);
   const [showConfirmDelete, setShowConfirmDelete] = useState(false);
   const [profile, setProfile] = useState<'lite' | 'full'>('full');
-  const [imageVariant, setImageVariant] = useState<'warm' | 'noble' | 'minimal'>('warm');
-  const [poolStatus, setPoolStatus] = useState<'none' | 'building' | 'warm' | 'claimed'>('none');
-  const [pool, setPool] = useState<PoolStatus | null>(null);
+  const [imageVariant, setImageVariant] = useState<'hosted' | 'warm' | 'noble' | 'minimal'>('hosted');
   const logEndRef = useRef<HTMLDivElement>(null);
 
   const refreshStatus = useCallback(async () => {
@@ -117,20 +116,6 @@ export function ClusterManager() {
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [logs]);
-
-  // Poll pool status
-  useEffect(() => {
-    let alive = true;
-    const poll = async () => {
-      try {
-        const s = await api.getPoolStatus();
-        if (alive) { setPoolStatus(s.state); setPool(s); }
-      } catch { /* ignore */ }
-    };
-    poll();
-    const id = setInterval(poll, 5000);
-    return () => { alive = false; clearInterval(id); };
-  }, []);
 
   // Auto-attach when a run is already in progress on mount
   useEffect(() => {
@@ -308,34 +293,7 @@ export function ClusterManager() {
         </Card>
       </div>
 
-      {pool?.mode !== 'ondemand' && poolStatus === 'warm' && (
-        <div className="flex items-center gap-2 text-xs text-green-600">
-          <span>⚡ Standby ready — Deploy claims instantly</span>
-        </div>
-      )}
-      {pool?.mode !== 'ondemand' && poolStatus === 'building' && (
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <span>Building standby… next Deploy will be instant once ready</span>
-        </div>
-      )}
-      {pool?.mode === 'ondemand' && poolStatus === 'none' && (
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <span>Sleeping — the cluster is built on first access (Deploy, kubectl via 172.18.255.223, or the target agent)</span>
-        </div>
-      )}
-      {pool?.mode === 'ondemand' && poolStatus === 'building' && (
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <span>Waking — building the cluster…</span>
-        </div>
-      )}
-      {pool?.mode === 'ondemand' && (poolStatus === 'claimed' || poolStatus === 'warm') && (
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <span>
-            Auto-deletes after {Math.round(pool.idleTTLSeconds / 60)} min without use —{' '}
-            {Math.max(0, Math.ceil((pool.idleTTLSeconds - pool.idleSeconds) / 60))} min left
-          </span>
-        </div>
-      )}
+      <TargetStatusBanner />
 
       {/* ── Profile selector ─────────────────────────────────── */}
       <div className="flex items-center gap-2">
@@ -369,6 +327,16 @@ export function ClusterManager() {
       <div className="flex items-center gap-2">
         <span className="text-sm text-muted-foreground w-16">Image:</span>
         <button
+          onClick={() => setImageVariant('hosted')}
+          className={`px-3 py-1 text-xs rounded-full border transition-colors ${
+            imageVariant === 'hosted'
+              ? 'bg-primary text-primary-foreground border-primary ring-2 ring-primary/40'
+              : 'bg-secondary text-secondary-foreground border-border hover:bg-accent hover:text-accent-foreground'
+          }`}
+        >
+          {imageVariant === 'hosted' && <span className="mr-1">✓</span>}Hosted CP · ~9s
+        </button>
+        <button
           onClick={() => setImageVariant('warm')}
           className={`px-3 py-1 text-xs rounded-full border transition-colors ${
             imageVariant === 'warm'
@@ -376,7 +344,7 @@ export function ClusterManager() {
               : 'bg-secondary text-secondary-foreground border-border hover:bg-accent hover:text-accent-foreground'
           }`}
         >
-          {imageVariant === 'warm' && <span className="mr-1">✓</span>}Warm · ~40s fast-path
+          {imageVariant === 'warm' && <span className="mr-1">✓</span>}Warm VM CP · ~18s
         </button>
         <button
           onClick={() => setImageVariant('noble')}
@@ -465,16 +433,17 @@ export function ClusterManager() {
                 <li>Checks KubeVirt, CDI, golden image, and CLI tools are available</li>
                 <li>Ensures MetalLB is running (installs if missing) — assigns IP <code className="bg-muted px-1 rounded">172.18.255.215</code></li>
                 <li>Ensures CAPI providers are initialized (KubeVirt + k3s bootstrap)</li>
-                <li>Applies the cluster manifest — creates 1 control-plane VM + 1 worker VM</li>
-                <li>Waits for VMs to boot and cloud-init to configure k3s</li>
+                <li>Hosted image (default): makes sure the resident k3s control-plane pod is up, then creates 2 agent VMs. Other images create 1 control-plane VM + 1 worker VM</li>
+                <li>Waits for the VMs to boot and their k3s agents to join</li>
                 <li>Waits for the k3s API server to respond and all nodes to be Ready</li>
               </ol>
               <p className="text-xs">
                 <strong>Lite profile:</strong> CP 2 CPU · 4 Gi &nbsp;|&nbsp; Worker 2 CPU · 4 Gi &nbsp;—&nbsp; low resource use<br/>
-                <strong>Full profile:</strong> CP 4 CPU · 8 Gi &nbsp;|&nbsp; Worker 4 CPU · 6 Gi &nbsp;—&nbsp; ~2–4 min faster spin-up
+                <strong>Full profile:</strong> CP 4 CPU · 8 Gi &nbsp;|&nbsp; Worker 4 CPU · 6 Gi<br/>
+                On the hosted image both VMs are workers and take the worker size; the control plane is a pod (~1 Gi).
               </p>
               <p className="text-xs">
-                <strong>Warm image (default):</strong> seeds fixed CAs + token and boots the worker in parallel on a pre-baked golden image — targets time-to-ready <strong>~40s</strong>. <strong>Pre-init</strong> images use the standard sequential path. (Demo use only — warm CA/token are committed.)
+                <strong>Hosted image (default):</strong> the k3s server runs permanently as a pod on the management cluster, so only the two agent VMs boot — both nodes Ready in <strong>~9s</strong>. <strong>Warm image:</strong> boots a control-plane VM plus a worker (~18s) and needs the backend started with <code className="bg-muted px-1 rounded">TARGET_CP_MODE=vm</code>. <strong>Pre-init</strong> images use the standard sequential path. (Demo use only — fixed CAs/token are committed.)
               </p>
               <p className="font-medium text-foreground mt-2">What Install Istio + nginx does:</p>
               <ol className="list-decimal list-inside space-y-1.5 text-xs">

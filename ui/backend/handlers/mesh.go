@@ -135,7 +135,12 @@ func HandleMeshTopology(w http.ResponseWriter, r *http.Request) {
 // cluster was reachable. See the CLAUDE.md pitfall: the target CA rotates on
 // every redeploy, so a stale kubeconfig makes this fail — hence the bool.
 func applyTargetOverlay(ctx context.Context, graph *MeshGraph) bool {
-	cfg, err := clientcmd.BuildConfigFromFlags("", targetKubeconfigPath())
+	// A topology poll is not use: never reach the target through the front door.
+	kc := backendTargetKubeconfig()
+	if kc == "" {
+		return false
+	}
+	cfg, err := clientcmd.BuildConfigFromFlags("", kc)
 	if err != nil {
 		log.Printf("mesh: target kubeconfig unusable: %v", err)
 		return false

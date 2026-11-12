@@ -18,6 +18,7 @@ resources:
   - schedules/ollama-warm.yaml
   - host-ollama-service.yaml
   - agent-egress-ollama.yaml
+  - agent-server-allow-eventbus.yaml
   - agent-kubevirt-rbac.yaml
   - agent-istio-rbac.yaml
   - node-probe-loopback-ds.yaml

@@ -108,9 +108,15 @@ if [ -z "${DISK_FILE}" ]; then
   kubectl exec ${HELPER_POD} -- sh -c 'if [ -b /disk ]; then echo "block"; elif [ -f /disk ]; then echo "file"; else ls -la /disk/; fi'
 fi
 
-info "Converting disk to qcow2 (compressed)..."
+# QCOW2_COMPRESS=0 writes an UNcompressed qcow2: a larger image, but guest
+# reads need no zlib decompression in qemu on the host. That is every read the
+# boot path makes: kernel, systemd, the 81MB k3s binary, containerd's store.
+# docs/sub-60s-cluster-strategy.md §12 (Phase 3). Default 1 = unchanged.
+QCOW2_COMPRESS="${QCOW2_COMPRESS:-1}"
+COMPRESS_FLAG=""; [ "$QCOW2_COMPRESS" = 1 ] && COMPRESS_FLAG="-c"
+info "Converting disk to qcow2 (compress=${QCOW2_COMPRESS})..."
 # CDI stores the disk image - convert it
-kubectl exec ${HELPER_POD} -- /bin/sh -c '
+kubectl exec ${HELPER_POD} -- env COMPRESS_FLAG="$COMPRESS_FLAG" /bin/sh -c '
   cd /disk
   echo "Disk contents:"
   ls -la
@@ -127,7 +133,7 @@ kubectl exec ${HELPER_POD} -- /bin/sh -c '
   qemu-img info "$DISK_FILE"
 
   echo "Converting to qcow2 (this may take a minute)..."
-  qemu-img convert -p -f raw -O qcow2 -c "$DISK_FILE" /tmp/disk.qcow2
+  qemu-img convert -p -f raw -O qcow2 $COMPRESS_FLAG "$DISK_FILE" /tmp/disk.qcow2
 
   echo "Conversion complete:"
   qemu-img info /tmp/disk.qcow2
