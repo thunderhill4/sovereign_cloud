@@ -57,6 +57,13 @@ TARGET_IMAGE="${TARGET_IMAGE:-localhost:5000/${DV_TARGET%-preinit}:preinit}"
 #                       boot the CAs KThrees writes already match the baked
 #                       leaves — no purge, no `--cluster-reset`. Single-cluster
 #                       only (reused etcd identity is safe). Target <40s.
+#   agent             — an AGENT-ONLY image for the hosted control plane
+#                       (03-target-cluster/hosted-cp/, docs/sub-60s-cluster-strategy.md
+#                       §12). No server state, no CAs. k3s-agent starts straight
+#                       from a baked config.yaml at network-online, and cloud-init
+#                       is DISABLED, so nothing waits on cloud-init's ~3.4s. The
+#                       node name is the DHCP hostname KubeVirt hands out (= VMI
+#                       name), which CAPK needs to match the Node to its Machine.
 BAKE_MODE="${BAKE_MODE:-preinit}"
 WARM_CA_DIR="${WARM_CA_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/03-target-cluster/warm-ca}"
 # Fixed join token for the warm image. MUST match scripts/seed-cluster-secrets.sh
@@ -584,6 +591,147 @@ emit_cloudinit() {
       systemctl enable k3s-early.service
       fi
 
+      if [ "${BAKE_MODE}" = "agent" ]; then
+      echo "[bake] Step 6e: AGENT image — wipe server state, bake agent config + early start..."
+      # Step 5 ran a throwaway k3s SERVER only so containerd imports the airgap
+      # images; keep that image store and drop everything else, so the VM boots
+      # with no server, no node identity, and nothing from the bake VM.
+      #
+      # containerd runs as its own early unit on agent images (k3s-containerd,
+      # below), from the config k3s generated in Step 5. k3s otherwise launches
+      # it itself, then polls the socket once immediately and then every 1s
+      # (pkg/agent/cri WaitForService): containerd was never up at the first
+      # check, so every boot paid a full second (measured 1.004-1.008s). Save
+      # the config before agent/etc is wiped.
+      K3S_BIN=/var/lib/rancher/k3s/data/current/bin
+      mkdir -p /etc/k3s-agent-containerd
+      cp /var/lib/rancher/k3s/agent/etc/containerd/config.toml /etc/k3s-agent-containerd/config.toml
+      # The throwaway server's pods (coredns, metrics-server, ...) are still in
+      # containerd's metadata; the agent's kubelet otherwise restores and removes
+      # them on every first boot. Start that containerd standalone and clear them.
+      PATH="/var/lib/rancher/k3s/data/cni:$K3S_BIN:$K3S_BIN/aux:$PATH" \
+        "$K3S_BIN/containerd" -c /etc/k3s-agent-containerd/config.toml >/var/log/bake-containerd.log 2>&1 &
+      CPID=$!
+      for i in $(seq 1 50); do [ -S /run/k3s/containerd/containerd.sock ] && break; sleep 0.2; done
+      "$K3S_BIN/crictl" --runtime-endpoint unix:///run/k3s/containerd/containerd.sock rmp -fa || true
+      echo "[bake] pods left in containerd: $("$K3S_BIN/crictl" --runtime-endpoint unix:///run/k3s/containerd/containerd.sock pods -q | wc -l)"
+      echo "[bake] images kept: $("$K3S_BIN/crictl" --runtime-endpoint unix:///run/k3s/containerd/containerd.sock images -q | wc -l)"
+      kill "$CPID"; wait "$CPID" 2>/dev/null || true
+      rm -rf /run/k3s
+      rm -rf /var/lib/rancher/k3s/server /etc/rancher/k3s/k3s.yaml /etc/rancher/node
+      find /var/lib/rancher/k3s/agent -mindepth 1 -maxdepth 1 \
+        ! -name containerd ! -name images -exec rm -rf {} +
+      # The images are already in containerd's store. Left in place, the tarball
+      # is re-imported on EVERY boot (measured 1.6s, competing for CPU with the
+      # agent start; docs §12).
+      rm -f /var/lib/rancher/k3s/agent/images/*.tar.zst
+      rm -rf /var/lib/kubelet/* /var/lib/cni /etc/cni/net.d/* 2>/dev/null || true
+
+      mkdir -p /etc/rancher/k3s
+      # Same values as the hosted manifest's static bootstrap. No kubelet-arg
+      # cloud-provider=external: nothing would clear its uninitialized taint.
+      {
+        echo "server: https://172.18.255.215:6443"
+        echo "token: f00dcafef00dcafef00dcafef00dcafe"
+        # Set => k3s does not launch its own containerd (k3s-containerd does).
+        echo "container-runtime-endpoint: unix:///run/k3s/containerd/containerd.sock"
+      } > /etc/rancher/k3s/config.yaml
+      chmod 0600 /etc/rancher/k3s/config.yaml
+
+      # VM<->VM reachability (KubeVirt bridge binding hands out the node's pod /24
+      # as on-link; kindnet never answers that ARP). Canonical copy and rationale:
+      # target-cluster-warm.tmpl.yaml. Must run on every VM, every boot.
+      cat > /usr/local/sbin/pod-subnet-via-gateway.sh << 'PSEOF'
+      #!/bin/sh
+      set -eu
+      dev=$(ip -4 route show default | awk '{print $5; exit}')
+      gw=$(ip -4 route show default | awk '{print $3; exit}')
+      [ -n "$dev" ] && [ -n "$gw" ] || exit 0
+      ip -4 route show dev "$dev" proto kernel scope link | awk -v d="$dev" -v g="$gw" '
+        { split($1, a, "/"); if (a[2] >= 31) next
+          p = a[2] + 1; split(a[1], o, ".")
+          n = ((o[1] * 256 + o[2]) * 256 + o[3]) * 256 + o[4]; h = 2 ^ (32 - p)
+          for (i = 0; i < 2; i++) { m = n + i * h
+            printf "ip route replace %d.%d.%d.%d/%d via %s dev %s\n",
+              int(m / 16777216) % 256, int(m / 65536) % 256, int(m / 256) % 256, m % 256, p, g, d } }' | sh
+      PSEOF
+      chmod 0755 /usr/local/sbin/pod-subnet-via-gateway.sh
+
+      # Gate: the node name must be the DHCP hostname (the VMI name), never the
+      # bake VM's or a placeholder, or CAPK cannot match Node to Machine. networkd
+      # applies the DHCP hostname as the transient hostname because /etc/hostname
+      # is emptied in Step 10. Then wait for the hosted server's supervisor
+      # (resident, so normally instant). Both waits are bounded; on timeout the
+      # unit fails and Restart= retries.
+      cat > /usr/local/sbin/k3s-agent-gate.sh << 'GATEEOF'
+      #!/bin/sh
+      i=0
+      while :; do
+        h=$(hostname)
+        case "$h" in ""|localhost|ubuntu|ubuntu-bake-vm-*) ;; *) break ;; esac
+        i=$((i+1)); [ "$i" -ge 300 ] && { echo "[k3s-agent-gate] no DHCP hostname after 30s (have '$h')"; exit 1; }
+        sleep 0.1
+      done
+      echo "[k3s-agent-gate] node name: $h"
+      i=0
+      until [ "$(curl -sk -o /dev/null -w '%{http_code}' --max-time 1 \
+               -u node:f00dcafef00dcafef00dcafef00dcafe \
+               https://172.18.255.215:6443/v1-k3s/readyz)" = 200 ]; do
+        i=$((i+1)); [ "$i" -ge 600 ] && { echo "[k3s-agent-gate] server not ready after ~2min"; exit 1; }
+        sleep 0.2
+      done
+      echo "[k3s-agent-gate] server ready"
+      GATEEOF
+      chmod 0755 /usr/local/sbin/k3s-agent-gate.sh
+
+      # Start the stock k3s-agent.service (After=network-online.target) on boot,
+      # gated as above. ConditionPathExists: the flag is written in Step 10, so
+      # nothing starts if the bake did not finish.
+      cat > /etc/systemd/system/k3s-containerd.service << 'CTRDEOF'
+      [Unit]
+      Description=containerd for k3s-agent, started ahead of it (docs/sub-60s-cluster-strategy.md §12)
+      ConditionPathExists=/etc/k3s-agent-baked
+      # No default dependencies: start as soon as the filesystems, kernel modules
+      # (overlay, br_netfilter) and sysctls are in place, instead of at
+      # basic.target (~0.3s later on this image). Then it is ready before the
+      # agent's network-online wait ends.
+      DefaultDependencies=no
+      After=local-fs.target systemd-modules-load.service systemd-sysctl.service systemd-tmpfiles-setup.service
+      Wants=systemd-modules-load.service systemd-sysctl.service
+      Before=k3s-agent.service shutdown.target
+      Conflicts=shutdown.target
+      [Service]
+      Type=notify
+      Environment=PATH=/var/lib/rancher/k3s/data/cni:/var/lib/rancher/k3s/data/current/bin:/var/lib/rancher/k3s/data/current/bin/aux:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      ExecStart=/var/lib/rancher/k3s/data/current/bin/containerd -c /etc/k3s-agent-containerd/config.toml
+      Delegate=yes
+      KillMode=process
+      LimitNOFILE=1048576
+      LimitNPROC=infinity
+      LimitCORE=infinity
+      TasksMax=infinity
+      OOMScoreAdjust=-999
+      Restart=always
+      RestartSec=2
+      [Install]
+      WantedBy=multi-user.target
+      CTRDEOF
+      systemctl enable k3s-containerd.service
+
+      mkdir -p /etc/systemd/system/k3s-agent.service.d
+      cat > /etc/systemd/system/k3s-agent.service.d/10-hosted-agent.conf << 'AGDROP'
+      [Unit]
+      ConditionPathExists=/etc/k3s-agent-baked
+      Wants=k3s-containerd.service
+      After=k3s-containerd.service
+      [Service]
+      ExecStartPre=/usr/local/sbin/k3s-agent-gate.sh
+      ExecStartPre=/usr/local/sbin/pod-subnet-via-gateway.sh
+      AGDROP
+      systemctl daemon-reload
+      systemctl enable k3s-agent
+      fi
+
       echo "[bake] Preserved state summary:"
       ls -la /var/lib/rancher/k3s/server/ 2>/dev/null || true
       du -sh /var/lib/rancher/k3s/server/db/ 2>/dev/null | sed 's/^/  etcd: /' || echo "  (no etcd db)"
@@ -681,6 +829,29 @@ emit_cloudinit() {
       cloud-init clean --logs
       truncate -s 0 /etc/machine-id
       rm -f /var/lib/dbus/machine-id /etc/ssh/ssh_host_*
+      if [ "${BAKE_MODE}" = "agent" ]; then
+        # cloud-init off for good: it cost ~3.4s before the agent could start and
+        # the agent needs nothing from it (config baked, SSH key baked in Step 7).
+        # The bake itself runs under cloud-init, so this only affects next boot.
+        touch /etc/cloud/cloud-init.disabled
+        # Empty static hostname, so networkd's DHCP hostname (the VMI name) wins.
+        : > /etc/hostname
+        # Host keys were just removed and cloud-init normally regenerates them;
+        # without it, a one-shot unit does, before sshd.
+        cat > /etc/systemd/system/ssh-hostkeys.service << 'HKEOF'
+      [Unit]
+      Description=Generate SSH host keys (cloud-init is disabled on agent images)
+      ConditionPathExists=!/etc/ssh/ssh_host_ed25519_key
+      Before=ssh.service ssh.socket
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/bin/ssh-keygen -A
+      [Install]
+      WantedBy=multi-user.target
+      HKEOF
+        systemctl enable ssh-hostkeys.service
+        touch /etc/k3s-agent-baked
+      fi
 
       systemctl daemon-reload
       sync

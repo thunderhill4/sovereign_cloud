@@ -6,7 +6,7 @@
 #
 # Env vars:
 #   PROFILE      lite | full                 (default: full)
-#   IMAGE_VARIANT warm | noble | minimal     (default: warm)
+#   IMAGE_VARIANT warm | hosted | noble | minimal   (default: warm)
 #   CLUSTER_NAME                              (default: target-cluster)
 #   API_LB_IP                                 (default: 172.18.255.215)
 #
@@ -17,6 +17,11 @@
 # NOTE: the `warm` variant renders target-cluster-warm.tmpl.yaml, which requires
 # scripts/seed-cluster-secrets.sh to have been run FIRST (so KThrees adopts the
 # pre-seeded CA/token that match the :warm image).
+#
+# The `hosted` variant renders target-cluster-hosted.tmpl.yaml: two agent VMs
+# joining the resident control-plane pod in 03-target-cluster/hosted-cp/. Run
+# `make hosted-cp` (seed-hosted-cp.sh + the server pod) before applying. The CP_*
+# sizes do not apply to it.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -39,9 +44,16 @@ case "$IMAGE_VARIANT" in
     TMPL="${SCRIPT_DIR}/../03-target-cluster/target-cluster-warm.tmpl.yaml"
     echo "note: warm variant — run scripts/seed-cluster-secrets.sh before applying." >&2
     ;;
+  hosted)
+    # Agent-only image (make bake-image-agent). HOSTED_IMAGE=...:warm also works:
+    # the bootstrap Secret still carries the cloud-init join path for it.
+    IMAGE="${HOSTED_IMAGE:-172.18.0.2:5000/ubuntu-noble-k3s:agent}"
+    TMPL="${SCRIPT_DIR}/../03-target-cluster/target-cluster-hosted.tmpl.yaml"
+    echo "note: hosted variant — run 'make hosted-cp' before applying." >&2
+    ;;
   noble)   IMAGE="172.18.0.2:5000/ubuntu-noble-k3s:preinit" ;;
   minimal) IMAGE="172.18.0.2:5000/ubuntu-minimal-k3s:preinit" ;;
-  *) echo "unknown IMAGE_VARIANT: $IMAGE_VARIANT (expected warm|noble|minimal)" >&2; exit 1 ;;
+  *) echo "unknown IMAGE_VARIANT: $IMAGE_VARIANT (expected warm|hosted|noble|minimal)" >&2; exit 1 ;;
 esac
 
 sed \

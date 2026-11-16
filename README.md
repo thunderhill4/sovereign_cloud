@@ -248,3 +248,7 @@ kubectl --context kind-cluster1 delete ns mc-demo
 kubectl --context kind-cluster2 delete svc target-cluster-nginx -n default
 kubectl --context kind-cluster2 delete endpoints target-cluster-nginx -n default
 ```
+
+## License
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).

@@ -8,8 +8,8 @@
 # ── Versions (single source of truth) ────────────────────────
 ISTIO_VERSION="${ISTIO_VERSION:-1.31.1}"
 GATEWAY_API_VERSION="${GATEWAY_API_VERSION:-v1.5.1}"
-CERT_MANAGER_VERSION="${CERT_MANAGER_VERSION:-v1.16.2}"
-METALLB_VERSION="${METALLB_VERSION:-v0.14.9}"
+CERT_MANAGER_VERSION="${CERT_MANAGER_VERSION:-v1.21.3}"
+METALLB_VERSION="${METALLB_VERSION:-v0.16.1}"
 KIALI_VERSION="${KIALI_VERSION:-2.4.0}"
 
 # ── Clusters ─────────────────────────────────────────────────

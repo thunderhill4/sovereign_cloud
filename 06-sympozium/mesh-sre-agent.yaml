@@ -54,7 +54,7 @@ spec:
         enabled: false
   authRefs:
     - provider: ollama
-      secret: llm-credentials
+      secret: mesh-sre-agent-llm-credentials
   skills:
     - skillPackRef: web-endpoint       # declarative serving (requiresServer=true)
     - skillPackRef: sre-observability  # triage playbooks

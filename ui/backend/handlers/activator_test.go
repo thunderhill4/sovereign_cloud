@@ -71,6 +71,7 @@ type frontDoorFixture struct {
 	up      atomic.Bool
 	wakes   atomic.Int32
 	touches atomic.Int32
+	stopped atomic.Bool
 	roots   *x509.CertPool
 	client  tls.Certificate
 }
@@ -96,6 +97,7 @@ func newFrontDoorFixture(t *testing.T, upstream string) *frontDoorFixture {
 		apiUp:    f.up.Load,
 		wake:     func() { f.wakes.Add(1) },
 		touch:    func() { f.touches.Add(1) },
+		stopped:  f.stopped.Load,
 		holdMax:  5 * time.Second,
 	}
 	go a.serve(ln)
@@ -129,6 +131,19 @@ func TestFrontDoorDownHoldsThenAsksForRetry(t *testing.T) {
 	}
 	if f.wakes.Load() != 1 {
 		t.Fatalf("wake called %d times, want 1", f.wakes.Load())
+	}
+}
+
+func TestFrontDoorStoppedRefusesWithoutWaking(t *testing.T) {
+	f := newFrontDoorFixture(t, "127.0.0.1:1")
+	f.stopped.Store(true)
+	resp := f.get(t, &tls.Config{RootCAs: f.roots, Certificates: []tls.Certificate{f.client}})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable || resp.Header.Get("Retry-After") != "" {
+		t.Fatalf("got %d Retry-After=%q, want 503 with no Retry-After", resp.StatusCode, resp.Header.Get("Retry-After"))
+	}
+	if f.wakes.Load() != 0 {
+		t.Fatal("a cluster deleted from the UI must not be woken")
 	}
 }
 

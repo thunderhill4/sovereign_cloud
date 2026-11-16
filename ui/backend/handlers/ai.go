@@ -92,6 +92,25 @@ func sympoziumNamespace() string {
 	return "sympozium-system"
 }
 
+// Whole-chat deadline, tool calls included. qwen3:8b on this host's mostly-CPU
+// Ollama takes 90-120s for one answer with a tool call, so the old fixed 120s
+// cut replies off; 5m matches the agent runner's own per-LLM-call limit.
+const (
+	defaultAIChatTimeout = 5 * time.Minute
+	minAIChatTimeout     = 30 * time.Second
+	maxAIChatTimeout     = 30 * time.Minute // the runner's run_timeout
+)
+
+func aiChatTimeout() time.Duration {
+	if s := os.Getenv("AI_CHAT_TIMEOUT"); s != "" {
+		if d, err := time.ParseDuration(s); err == nil && d >= minAIChatTimeout && d <= maxAIChatTimeout {
+			return d
+		}
+		log.Printf("AI: invalid AI_CHAT_TIMEOUT %q (want %v-%v), using %v", s, minAIChatTimeout, maxAIChatTimeout, defaultAIChatTimeout)
+	}
+	return defaultAIChatTimeout
+}
+
 func getDefaultAgent() string {
 	if name := os.Getenv("SYMPOZIUM_DEFAULT_AGENT"); name != "" {
 		return name
@@ -253,7 +272,7 @@ func HandleAIChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), aiChatTimeout())
 	defer cancel()
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, agentURL, bytes.NewReader(body))

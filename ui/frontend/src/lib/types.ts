@@ -243,7 +243,11 @@ export interface PoolStatus {
   lastError: string;
   mode: 'standby' | 'ondemand';
   idleSeconds: number;
-  idleTTLSeconds: number;
+  idleTTLSeconds: number; // 0 = never auto-delete
+  idleTTLSource: 'default' | 'env' | 'ui';
+  stopped: boolean; // deleted from the UI: stays down until the next Deploy
+  deleting: boolean; // the Cluster has a deletionTimestamp
+  deletingSeconds: number;
 }
 
 // ── Istio 1.30 ambient mesh / Gateway API (07-istio-advanced) ──────────────

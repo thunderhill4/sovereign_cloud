@@ -1,0 +1,26 @@
+# Owns the target cluster's API VIP. This is the same address the :warm image's
+# serving cert SAN, the agents' config.yaml, and every published kubeconfig use.
+# The legacy warm manifest's CAPK control-plane Service claims the same IP, so the
+# two paths cannot run at once (scripts/seed-hosted-cp.sh refuses if a
+# KThreesControlPlane for target-cluster exists).
+apiVersion: v1
+kind: Service
+metadata:
+  name: k3s-server
+  namespace: target-cp
+  annotations:
+    metallb.universe.tf/loadBalancerIPs: "172.18.255.215"
+spec:
+  type: LoadBalancer
+  # With --disable-agent, k3s's own egress proxy dials wss://<VIP>:6443 (its
+  # advertise-address), i.e. this Service, before the pod is Ready. Without this
+  # the Service has no endpoints yet, the dial is refused, and the server never
+  # becomes Ready: a startup deadlock seen on the first spike run.
+  publishNotReadyAddresses: true
+  selector:
+    app: k3s-server
+  ports:
+    - name: https
+      port: 6443
+      targetPort: 6443
+      protocol: TCP

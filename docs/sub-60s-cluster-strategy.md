@@ -681,3 +681,205 @@ What is left, by size: k3s server startup (~3.3-4s), the worker join after the C
 (~3.5-4s), and systemd before cloud-init (~2s).
 
 Rollback tags: `ubuntu-noble-k3s:warm-b0` (image before Step 6d), `:warm-b1` (= current `:warm`).
+
+---
+
+## 12. Hosted control plane (2026-10-21) — spike: 18.1s -> 14.2s, and where the floor really is
+
+**Result: both nodes Ready in 14.6 / 14.2 / 14.2s (median 14.2s)** from `kubectl apply`, with
+the k3s server running as a resident pod on cluster2 and both KubeVirt VMs as agents. Same
+`:warm` image as §11, so cloud-init is still on the boot path. `make hosted-cp-verify` passes 24/24.
+
+### Why the control plane had to leave the VM
+
+With the server inside a VM, nothing can join until the guest has booted *and* k3s server has
+started (≥3s). That bottoms out near 9–10s for the control plane alone. Moving the server into a
+pod that is already running when the VMs start takes it off the critical path entirely. Bring-up
+becomes VM start + guest boot + agent join.
+
+### What was built (branch `feat/hosted-control-plane`)
+
+- `03-target-cluster/hosted-cp/` — `rancher/k3s:v1.37.0-k3s1 server --disable-agent` Deployment
+  (namespace `target-cp`, PVC on `standard`), LoadBalancer Service on `172.18.255.215`.
+  An init container copies the 11 fixed warm CA files into `tls/`; k3s adopts them.
+- `scripts/seed-hosted-cp.sh` — the CA Secret, plus `default/target-cluster-kubeconfig` with an
+  admin cert signed by `warm-ca/client-ca`, no ownerReference.
+- `03-target-cluster/target-cluster-hosted{.tmpl,}.yaml` — Cluster with no `controlPlaneRef` and
+  a preset `controlPlaneEndpoint` (also on the KubevirtCluster, no LB template), static agent
+  bootstrap Secret, MachineDeployment `replicas: 2`.
+- `scripts/verify-hosted-cp.sh` (`make hosted-cp-verify`), `make hosted-cp`, `make target-cluster-hosted`.
+
+### Findings
+
+1. **`--disable-agent` works** (hidden upstream flag). `kubectl logs`/`exec` on both VMs go through
+   the agent tunnel; CoreDNS runs on a VM; pods on both VMs reach `kubernetes.default`.
+2. **Startup deadlock, fixed:** with `--disable-agent`, k3s's own egress proxy dials
+   `wss://<advertise-address>:6443/v1-k3s/connect` — the Service — before the pod is Ready, and the
+   Service has no endpoints until it is. `publishNotReadyAddresses: true` on the Service fixes it.
+3. **Unauthenticated `/readyz` and `/livez` return 401** on this server (the VM server answered
+   200). Probes use the supervisor's `/v1-k3s/readyz` with `node:<token>` basic auth (readiness)
+   and TCP (liveness). **The backend's `targetAPIUp` in `activator.go` and `phase-timings.sh`'s
+   VIP probe both probe unauthenticated `/readyz` and must change before the backend uses this.**
+4. **CAPI/CAPK wiring as predicted:** `clusterctl get kubeconfig` returns the seeded Secret; CAPK
+   sets `providerID` (`kubevirt://<vm>`) and both Machines get NodeRefs with no control-plane object.
+5. **Delete cycle as predicted:** the kubeconfig Secret survives `kubectl delete cluster`; the two
+   Nodes (and their node-password Secrets) **stay in the server, still marked Ready**. Whoever
+   deletes the Cluster must delete the Nodes. Teardown to VMs gone: 12s.
+6. Server pod Ready about 6s after creation, about 1Gi requested.
+
+### Where the 14.2s goes (one VM, guest uptime from the serial console and agent journal)
+
+```
+apply -> VMI Running                    3.1-4.2s   (CAPI + virt-launcher + qemu)
+kernel -> systemd                       2.1s
+systemd -> cloud-init final -> agent    3.4s       (agent start issued at 5.46s uptime)
+agent: unit start -> k3s running        0.7s
+       endpoints + containerd           1.75s
+       kubelet, node registered         0.8s
+       flannel                          1.05s
+       -> Ready / unit started          1.2s       (11.23s uptime)
+airgap tarball re-imported every boot   1.6s       (parallel, competes for CPU)
+```
+
+### Revised outlook — the 6–7s estimate was optimistic
+
+The agent itself takes ~5s from start to Ready, not the 1.5–2s assumed. Projected, each still
+to be measured:
+
+| step | saves | both nodes Ready |
+|---|---|---|
+| today (hosted CP, `:warm`) | — | 14.2s |
+| `:agent` image: agent at network-online, no cloud-init | ~2.8s | ~11.4s |
+| skip the per-boot airgap re-import | ~0.3-0.5s | ~11s |
+| image volumes + direct kernel boot | ~1.7s | ~9.3s |
+| agent trims (flannel, kubelet/containerd start) | unknown | ~8.5-9s? |
+
+So **under 10s looks reachable; under 6s does not with VMs plus k3s agents.** The API itself is
+up permanently, so an on-demand wake answers `kubectl get ns` instantly; only node-dependent
+work waits.
+
+### Caveat: the hosted CP owns .215
+
+The legacy warm manifest's CAPK Service also claims `172.18.255.215`. Until the backend is
+switched (Phase 1), **do not run `run-ui.sh` in on-demand or standby pool mode while the hosted
+control plane is up**: the pool would apply the legacy warm manifest onto the same VIP.
+`seed-hosted-cp.sh` refuses in the other direction. Remove the hosted CP with
+`kubectl delete cluster target-cluster; kubectl delete ns target-cp`.
+
+### Phase 2 — `:agent` image (2026-10-21): 14.2s -> 11.4s
+
+`BAKE_MODE=agent` in `bake-common.sh` (Step 6e + an agent-only block in Step 10), built with
+`make bake-image-agent build-containerdisk-agent pre-pull-agent`
+(`localhost:5000/ubuntu-noble-k3s:agent`). From the warm bake it keeps Steps 1–4e (k3s binary,
+boot trims), runs the throwaway server in Step 5 only to import the airgap images into
+containerd, then:
+
+- wipes all server state, node identity, kubelet/CNI state and the airgap tarball (images stay in
+  containerd's store, so there is no per-boot re-import)
+- bakes the agent `config.yaml` (VIP + token) and `pod-subnet-via-gateway.sh`
+- enables the stock `k3s-agent.service` with a drop-in: `ConditionPathExists=/etc/k3s-agent-baked`,
+  `ExecStartPre=k3s-agent-gate.sh` (waits for a DHCP hostname that isn't a placeholder, then the
+  server's `/v1-k3s/readyz`), and `ExecStartPre=pod-subnet-via-gateway.sh`
+- **disables cloud-init** (`/etc/cloud/cloud-init.disabled`), empties `/etc/hostname` so
+  networkd's DHCP hostname (the VMI name) becomes the node name, and adds `ssh-hostkeys.service`
+  because cloud-init no longer regenerates SSH host keys
+
+Bake: 96s end to end (clone 30s, bake VM ~60s). `make hosted-cp-verify` 24/24.
+
+`scripts/time-to-ready-hosted.sh --runs 3` (clean teardown each run, stale Nodes deleted):
+
+| image | both nodes Ready (s) | median |
+|---|---|---|
+| `:warm` (cloud-init path) | 14.6 / 14.2 / 14.2 | 14.2 |
+| `:agent` | 12.1, then 11.4 / 10.9 / 11.5 | **11.4** |
+
+One agent VM, guest uptime (`systemd-analyze`, agent journal):
+
+```
+kernel                              1.47s
+gate: DHCP hostname, server ready   2.95 / 3.05s   (was 5.46s: cloud-init gone)
+k3s agent process running           3.74s
+containerd running                  5.50s
+kubelet, node registered            6.03 / 6.24s
+flannel backend                     7.41s
+k3s-agent.service started           8.39s          (userspace total 6.93s)
+```
+
+Apply -> VMI Running is 3.1–4.5s on top. What is left, by size: k3s agent start to Ready (~4.65s,
+of which ~1.76s before containerd is running), launcher→qemu (~3s), and gate-to-k3s-start (0.7s).
+Next is Phase 3: image volumes, direct kernel boot, and agent startup trims.
+
+The bootstrap Secret in `target-cluster-hosted.yaml` still carries the cloud-init join path. It is
+ignored on `:agent` (cloud-init is off) and keeps `HOSTED_IMAGE=...:warm` working as a fallback.
+
+### Phase 3 — measured levers (2026-10-21): 11.4s -> ~8.5-9.5s
+
+Each lever was A/B'd with `scripts/time-to-ready-hosted.sh` (clean teardown, stale Nodes deleted)
+and attributed with guest-uptime milestones from the journal (node debug pod; the serial console
+is no longer logged).
+
+| lever | result | kept |
+|---|---|---|
+| uncompressed qcow2 containerDisk (`QCOW2_COMPRESS=0`) | 11.4 -> **10.6s** (10.6/10.6/10.8 vs 11.4/12.1/10.9, same session). Every guest read skipped zlib in qemu; k3s process start 0.74 -> 0.35s, node Ready 6.5 -> 5.8s uptime. Image 1.5 -> 3.4GB | yes |
+| containerd as its own unit + `container-runtime-endpoint` | 10.6 -> **9.7s** (9.8/9.7/9.4). k3s launches containerd, checks once, then polls every 1s (`pkg/agent/cri` WaitForService); containerd boots in 0.105s but was never up at the first check, so each boot paid 1.004-1.008s. Node Ready 5.8 -> 4.3s uptime | yes |
+| clear the bake's leftover pods from containerd | removed 8 stale containers the kubelet used to restore/remove on first start; no separate timing | yes |
+| image volumes (KubeVirt `ImageVolume`) | **already active**: Beta gates are on by default in KubeVirt v1.9.0, and launcher pods mount the disk as an `image` volume. Nothing to gain | n/a |
+| direct kernel boot (`firmware.kernelBoot`) | 9.7 -> 9.9s (10.2/9.9/9.7): **no gain**. It adds a second init container (`volumekernel-boot-volume`); init containers run in sequence, so qemu started 1s later, cancelling the ~0.8s of SeaBIOS+GRUB it skips | **no** |
+| `logSerialConsole: false` (no `guest-console-log` sidecar) | 9.7 -> **8.5s** (8.8/8.5/8.5). Guest Ready only moved 4.33 -> 4.12s uptime, so most of the gain is before the kernel: SeaBIOS/GRUB serial output was slow while virt-tail was reading the port | yes |
+| containerd with `DefaultDependencies=no` (start at local-fs, not basic.target) | guest: containerd ready 2.87 -> 2.77s, node Ready unchanged (4.12 vs 4.18s). Interleaved A/B 9.45s (old image) vs 8.7s (new), but most of that gap is in VMI Running, which a guest change cannot touch, so treat it as noise around a ~0.1s gain | yes (no regression) |
+
+Host noise rose during the session (load average ~3; run spread ±0.5s, against 0.5s total earlier),
+so the honest summary is **both nodes Ready in ~8.5-9.5s, median ≈9s**, down from 18.1s on the
+legacy path.
+
+Where the ~9s goes now (one run, ~8.6s):
+
+```
+apply -> VMI Running                        ~3.3-4.0s   (CAPI ~0.5, pod 1s, virt-launcher/libvirt/qemu ~2s)
+SeaBIOS + GRUB (not measurable without the console)  ~0.5-0.8s
+kernel                                       1.41s
+userspace -> network-online / containerd     2.28-2.77s uptime
+gate + k3s process start                     2.88 -> 3.00s
+certs + kubelet start                        3.00 -> 3.75s
+registered -> Ready                          3.96 -> 4.18s uptime
+```
+
+**Under 6s is not reachable with this stack.** Getting the VM to its first guest instruction
+already takes ~4s (CAPI + virt-launcher + libvirt + qemu + firmware), and a k3s agent then needs
+~2.7s of guest time even with everything above. What is left is small: the agent's certificate
+round trips (~0.75s), systemd before local-fs (~2s, mostly kernel), and launcher→qemu inside
+KubeVirt. The API itself is resident, so on-demand wakes answer immediately.
+
+Rollback tags in the local registry: `ubuntu-noble-k3s:agent-nc` (uncompressed, before early
+containerd), `:agent-p3a` (early containerd at basic.target), current `:agent`. Kernel-boot image
+(rejected): `ubuntu-noble-k3s-kernel:6.8.0-139`.
+
+### Backend switched to the hosted path (2026-10-21)
+
+`TARGET_CP_MODE` (`run-ui.sh` default `hosted`, `vm` = VM control plane) selects the path;
+`ui/backend/handlers/hosted.go` holds the hosted-specific pieces.
+
+- `run-ui.sh` starts the resident server (`seed-hosted-cp.sh` + `kubectl apply -k`) at launch; the
+  backend re-ensures it before every build (`ensureHostedCP`).
+- Deploy defaults to the `hosted` image (`:agent` + `target-cluster-hosted.tmpl.yaml`) and refuses
+  VM-control-plane images in hosted mode (they would claim `.215`). The pool's default manifest is
+  `target-cluster-hosted.yaml`.
+- Every teardown (UI Delete, idle delete, the non-streaming delete) deletes the agents' Nodes
+  (`deleteTargetNodes`); builds also clear any left by a failed teardown.
+- The front door's "up" is `targetUsable` = 2 target Nodes Ready (cached 1s up / 200ms down).
+  The API always answers and returns 401 to unauthenticated `/readyz`, so the VM path's probe
+  would have read "down" forever, or, counted as up, spliced to an empty API and never woken it.
+- `make target-cluster` now builds the hosted path.
+
+Verified end to end on a live backend (on-demand, idle TTL 90s):
+
+| action | result |
+|---|---|
+| cold wake: plain `kubectl --kubeconfig target-cluster-kubeconfig get nodes` via `.223`, no cluster | **10.4s**, returned 2 Ready nodes (VM path: 15.3s to the first API answer, nodes ~5s later) |
+| idle delete after 90s | Cluster + VMs gone, Nodes gone, server pod untouched, published kubeconfig kept |
+| UI Deploy (`POST /api/v1/cluster/deploy`) from nothing | stream done in **11.2s** incl. prerequisite checks, 2 Ready nodes |
+| UI Delete (`POST /api/v1/cluster/delete`) | 13s; "Old Node objects removed"; server pod untouched |
+| Deploy `image=warm` in hosted mode | refused with the switch-back instructions; nothing created |
+
+`go test ./handlers/` passes (new `hosted_test.go`: name-based Ready count, image/mode rules,
+mode defaults). Not yet updated: the mesh topology view still draws a control-plane VM.

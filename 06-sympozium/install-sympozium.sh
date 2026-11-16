@@ -9,7 +9,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SYMPOZIUM_NS="${SYMPOZIUM_NAMESPACE:-sympozium-system}"
-CERT_MANAGER_VERSION="${CERT_MANAGER_VERSION:-v1.16.2}"
+CERT_MANAGER_VERSION="${CERT_MANAGER_VERSION:-v1.21.3}"
 # Pinned to the version these manifests/labs are verified against.
 # Upgraded 0.10.38 -> 0.10.47 (2026-08-21) -> 0.10.57 (2026-09-09) -> 0.10.75
 # (2026-09-16) -> 0.10.87 (2026-09-30; see the 0.10.75 -> 0.10.87 note below).
@@ -101,7 +101,7 @@ CERT_MANAGER_VERSION="${CERT_MANAGER_VERSION:-v1.16.2}"
 # answer matched real cluster state. Re-run this same check after any future
 # upgrade -- the per-run identity model is new enough here that it could
 # change again.
-SYMPOZIUM_CHART_VERSION="${SYMPOZIUM_CHART_VERSION:-0.10.87}"
+SYMPOZIUM_CHART_VERSION="${SYMPOZIUM_CHART_VERSION:-0.12.2}"
 
 # LLM credentials. For Ollama-compatible endpoints that don't require auth,
 # any non-empty value works. Override LLM_API_KEY if using OpenAI/Anthropic.
@@ -178,6 +178,15 @@ kubectl create secret generic llm-credentials \
     --from-literal=apiKey="$LLM_API_KEY" \
     -n "$SYMPOZIUM_NS" \
     --dry-run=client -o yaml | kubectl apply -f -
+# 0.11.0+: an Agent may not share a key Secret with another Agent (the admission
+# webhook refuses the serving run). cluster2-agent keeps llm-credentials; the
+# others get their own copy of the same key.
+for agent in mesh-sre-agent target-cluster-agent incident-responder cost-analyzer; do
+    kubectl create secret generic "${agent}-llm-credentials" \
+        --from-file=apiKey=<(kubectl get secret llm-credentials -n "$SYMPOZIUM_NS" -o jsonpath='{.data.apiKey}' | base64 -d) \
+        -n "$SYMPOZIUM_NS" \
+        --dry-run=client -o yaml | kubectl apply -f -
+done
 
 echo ""
 echo "== 4/5 Applying Phase-0 core bundle (policies + warm schedule + cluster2-agent) =="

@@ -1,0 +1,122 @@
+# Hosted k3s control plane for target-cluster. The server runs here, resident on
+# cluster2. Both KubeVirt VMs are agents that join it, so bring-up is VM boot plus
+# agent join, with no control-plane boot on the critical path.
+# Design and constraints: docs/sub-60s-cluster-strategy.md §12.
+#
+# Identity is the warm path's fixed identity:
+#   - the 11 CA files from 03-target-cluster/warm-ca/ (Secret hosted-cp-ca,
+#     created by scripts/seed-hosted-cp.sh), copied into tls/ before every start;
+#     k3s adopts pre-placed CAs and signs its leaves from them, as the warm bake proved
+#   - token f00dcafe... (WARM_TOKEN), the same one the agent bootstrap carries
+#   - VIP 172.18.255.215 as tls-san and advertise-address
+#
+# --disable-agent (hidden, unsupported upstream flag): no kubelet in this pod, so
+# it needs no privileges and does not become a node. apiserver->kubelet traffic
+# goes over the agents' tunnel (egress-selector-mode: agent, the default), which
+# matters because VM pod IPs are unreachable from other pods.
+# If the spike shows logs/exec broken with it, the fallback is a privileged pod
+# without --disable-agent, tainted NoSchedule.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k3s-server
+  namespace: target-cp
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # RWO PVC + SQLite: never two servers at once
+  selector:
+    matchLabels:
+      app: k3s-server
+  template:
+    metadata:
+      labels:
+        app: k3s-server
+    spec:
+      enableServiceLinks: false
+      initContainers:
+        - name: place-warm-ca
+          image: rancher/k3s:v1.37.0-k3s1
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              t=/var/lib/rancher/k3s/server/tls
+              mkdir -p "$t/etcd"
+              for f in server-ca client-ca request-header-ca; do
+                cp -f /warm-ca/$f.crt /warm-ca/$f.key "$t/"
+              done
+              for f in server-ca peer-ca; do
+                cp -f /warm-ca/etcd-$f.crt "$t/etcd/$f.crt"
+                cp -f /warm-ca/etcd-$f.key "$t/etcd/$f.key"
+              done
+              cp -f /warm-ca/service.key "$t/service.key"
+              chmod 600 "$t"/*.key "$t"/etcd/*.key
+              echo "warm CAs placed in $t"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/rancher/k3s
+            - name: warm-ca
+              mountPath: /warm-ca
+              readOnly: true
+      containers:
+        - name: k3s
+          image: rancher/k3s:v1.37.0-k3s1
+          args:
+            - server
+            - --disable-agent
+            - --token=f00dcafef00dcafef00dcafef00dcafe
+            - --tls-san=172.18.255.215
+            - --advertise-address=172.18.255.215
+            - --disable=servicelb,traefik
+            - --disable-cloud-controller
+            - --cluster-cidr=10.42.0.0/16
+            - --service-cidr=10.43.0.0/16
+          ports:
+            - name: https
+              containerPort: 6443
+          # The apiserver answers 401 to unauthenticated /readyz and /livez.
+          # Readiness uses the supervisor's /v1-k3s/readyz with node:<token>
+          # basic auth, the same gate the agents poll: 503 until the runtime
+          # core is up. Liveness is a plain TCP check, so a slow first start
+          # (or a 401) never gets the pod killed.
+          readinessProbe:
+            httpGet:
+              scheme: HTTPS
+              path: /v1-k3s/readyz
+              port: 6443
+              httpHeaders:
+                - name: Authorization
+                  value: Basic bm9kZTpmMDBkY2FmZWYwMGRjYWZlZjAwZGNhZmVmMDBkY2FmZQ==   # base64("node:<WARM_TOKEN>")
+            periodSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: 6443
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/rancher/k3s
+            - name: etc-rancher
+              mountPath: /etc/rancher
+            - name: run
+              mountPath: /run
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: k3s-server-data
+        - name: warm-ca
+          secret:
+            secretName: hosted-cp-ca
+            defaultMode: 0400
+        - name: etc-rancher
+          emptyDir: {}
+        - name: run
+          emptyDir: {}
