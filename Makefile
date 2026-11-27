@@ -85,10 +85,10 @@ help:
 	@echo "  make sympozium-lb          - Patch Sympozium serving Services to LoadBalancer via MetalLB"
 	@echo "  make sympozium-fix-node-probe - Re-apply node-probe loopback redirect (after cluster2-control-plane restarts)"
 	@echo "  make sympozium-fix-llmfit-gpu - Re-inject nvidia-smi shim into llmfit-daemon (fixes GPU shown as AMD)"
-	@echo "  make sympozium-pack-install   - Apply Phase-0 core bundle (policies + warm schedule + cluster2-agent)"
+	@echo "  make sympozium-pack-install   - Apply Phase-0 core bundle (policies + cluster2-agent + mesh-sre-agent)"
 	@echo "  make sympozium-pack-uninstall - Remove Phase-0 core bundle"
 	@echo "  make sympozium-demo-agents - Apply cost-analyzer + incident-responder + patch LBs"
-	@echo "  make sympozium-warm        - Keep Ollama llama3.2 resident (fixes cold-start)"
+	@echo "  make sympozium-warm        - Load the agent model (model.env) into Ollama now"
 	@echo "  make sympozium-models      - Create the larger-context Ollama models the agents use"
 	@echo "  make sympozium-demo        - Run end-to-end Sympozium demo (agent fixes a stuck VM)"
 	@echo "  make sympozium-demo-clean  - Restore any VMs the demo stopped + delete demo agents"
@@ -409,13 +409,13 @@ sympozium-demo-agents: ## Apply cost-analyzer + incident-responder CRs and patch
 	bash 06-sympozium/fix-web-proxy-rootfs.sh cost-analyzer-web-endpoint-server incident-responder-web-endpoint-server
 	bash sympozium-lb-setup.sh
 
-sympozium-pack-install: ## Apply Phase-0 core bundle (policies + warm schedule + cluster2-agent)
+sympozium-pack-install: ## Apply Phase-0 core bundle (policies + cluster2-agent + mesh-sre-agent)
 	kubectl apply -k 06-sympozium/
 
 sympozium-pack-uninstall: ## Remove Phase-0 core bundle
 	kubectl delete -k 06-sympozium/ --ignore-not-found
 
-sympozium-warm: ## Manual warm fallback (canonical path is the ollama-warm SympoziumSchedule in the core bundle)
+sympozium-warm: ## Load the agent model now (warmth is host-level: snippets/host-ollama/ollama-override.conf)
 	bash 06-sympozium/ollama-warm.sh
 
 sympozium-models: ## Create the Ollama model variants the agents name (larger num_ctx; see ollama-models.sh)
